@@ -1,0 +1,400 @@
+//! Round-trip tests for the GGML block quantizers.
+//!
+//! Each test quantizes a small known input, then dequantizes it via the
+//! quantizer's test-only `dequant` mirror and asserts that the values are
+//! within the expected tolerance for the type. We also assert the exact
+//! output byte count and a few hand-computed anchor points.
+
+use spynaltap::formats::gguf::dequant;
+use spynaltap::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
+use spynaltap::formats::gguf::writer::GgufWriter;
+use spynaltap::formats::gguf::GgufFile;
+use spynaltap::quantize::apply::quantize_gguf;
+use spynaltap::quantize::{q4_0, q4_1, q5_0, q5_1, q8_0};
+
+const BLOCK: usize = 32;
+
+fn l1(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum()
+}
+
+#[test]
+fn q8_0_roundtrip_uniform() {
+    // 32 elements all equal to 4.0 -> d = 4/127, q = 127, recon = 127 * d ≈ 4.
+    let src: Vec<f32> = vec![4.0; BLOCK];
+    let bytes = q8_0::quantize(&src);
+    assert_eq!(bytes.len(), 34);
+    let out = q8_0::dequant(&bytes);
+    assert_eq!(out.len(), BLOCK);
+    assert!(l1(&src, &out) < 0.1, "l1 = {}", l1(&src, &out));
+    // Each element should be within 1/127 of 4.0.
+    for &v in &out {
+        assert!((v - 4.0).abs() < 0.05, "v = {}", v);
+    }
+}
+
+#[test]
+fn q8_0_roundtrip_mixed() {
+    // Mix of small and large values, all within int8 range after scaling.
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK {
+        let t = i as f32 / BLOCK as f32;
+        src.push((t * 2.0 - 1.0) * 100.0);
+    }
+    let bytes = q8_0::quantize(&src);
+    let out = q8_0::dequant(&bytes);
+    // Max abs error is roughly amax / 127.
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let tol = amax / 127.0 + 0.5; // +epsilon for the f16 d round-trip
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "i={} a={} b={} tol={}", i, a, b, tol);
+    }
+}
+
+#[test]
+fn q8_0_handles_all_zero() {
+    let src = vec![0.0f32; BLOCK];
+    let bytes = q8_0::quantize(&src);
+    let out = q8_0::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q4_0_roundtrip_uniform() {
+    // All 4.0 -> d = 4/8 = 0.5, n = round(4/0.5 + 8) = 16 -> clamped to 15
+    // -> recon = 0.5 * (15 - 8) = 3.5
+    // So we expect ~3.5, not 4.0. That's the Q4_0 dynamic-range limit.
+    let src: Vec<f32> = vec![4.0; BLOCK];
+    let bytes = q4_0::quantize(&src);
+    assert_eq!(bytes.len(), 18);
+    let out = q4_0::dequant(&bytes);
+    for &v in &out { assert!((v - 3.5).abs() < 0.05, "v = {}", v); }
+}
+
+#[test]
+fn q4_0_roundtrip_bipolar() {
+    // Symmetric around 0: should quantize well.
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK {
+        let t = i as f32 / BLOCK as f32;
+        src.push((t * 2.0 - 1.0) * 4.0); // [-4, 4)
+    }
+    let bytes = q4_0::quantize(&src);
+    let out = q4_0::dequant(&bytes);
+    // Tolerance: 4 / 8 = 0.5 quantization step, plus f16 storage of d.
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < 0.6, "i={} a={} b={}", i, a, b);
+    }
+}
+
+#[test]
+fn q4_0_handles_all_zero() {
+    let src = vec![0.0f32; BLOCK];
+    let bytes = q4_0::quantize(&src);
+    let out = q4_0::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q4_1_roundtrip_positive() {
+    // All positive, 0..30. d = 30/15 = 2.0, m = 0.
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK { src.push(i as f32); }
+    let bytes = q4_1::quantize(&src);
+    assert_eq!(bytes.len(), 20);
+    let out = q4_1::dequant(&bytes);
+    let tol = 30.0 / 15.0 / 2.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "i={} a={} b={} tol={}", i, a, b, tol);
+    }
+}
+
+#[test]
+fn q4_1_roundtrip_offset() {
+    // Values shifted by -5.0: d = 30/15, m = -5.
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK { src.push(i as f32 - 5.0); }
+    let bytes = q4_1::quantize(&src);
+    let out = q4_1::dequant(&bytes);
+    let tol = 30.0 / 15.0 / 2.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "i={} a={} b={} tol={}", i, a, b, tol);
+    }
+}
+
+#[test]
+fn q4_1_handles_all_zero() {
+    let src = vec![0.0f32; BLOCK];
+    let bytes = q4_1::quantize(&src);
+    let out = q4_1::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q5_0_roundtrip_bipolar() {
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK {
+        let t = i as f32 / BLOCK as f32;
+        src.push((t * 2.0 - 1.0) * 8.0); // [-8, 8)
+    }
+    let bytes = q5_0::quantize(&src);
+    assert_eq!(bytes.len(), 22);
+    let out = q5_0::dequant(&bytes);
+    // 5-bit grid step is 1/16 of amax.
+    let amax = 8.0f32;
+    let tol = amax / 16.0 + 0.1;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "i={} a={} b={} tol={}", i, a, b, tol);
+    }
+}
+
+#[test]
+fn q5_0_handles_all_zero() {
+    let src = vec![0.0f32; BLOCK];
+    let bytes = q5_0::quantize(&src);
+    let out = q5_0::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q5_1_roundtrip_offset() {
+    let mut src = Vec::with_capacity(BLOCK);
+    for i in 0..BLOCK { src.push(i as f32 - 16.0); }
+    let bytes = q5_1::quantize(&src);
+    assert_eq!(bytes.len(), 24);
+    let out = q5_1::dequant(&bytes);
+    let tol = 31.0 / 31.0 / 2.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "i={} a={} b={} tol={}", i, a, b, tol);
+    }
+}
+
+#[test]
+fn q5_1_handles_all_zero() {
+    let src = vec![0.0f32; BLOCK];
+    let bytes = q5_1::quantize(&src);
+    let out = q5_1::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn multi_block_roundtrip() {
+    // 5 blocks = 160 elements per type, all types.
+    let n_blocks = 5;
+    let mut src = Vec::with_capacity(n_blocks * BLOCK);
+    for i in 0..n_blocks * BLOCK {
+        let t = i as f32 / (n_blocks * BLOCK) as f32;
+        // Different ranges per type, kept safely within each type's grid.
+        src.push((t * 2.0 - 1.0) * 30.0);
+    }
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+
+    // Q8_0: full precision.
+    let bytes = q8_0::quantize(&src);
+    let out = q8_0::dequant(&bytes);
+    let tol = amax / 127.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "Q8_0 i={} a={} b={}", i, a, b);
+    }
+
+    // Q5_1: full 5-bit asymmetric range.
+    let bytes = q5_1::quantize(&src);
+    let out = q5_1::dequant(&bytes);
+    let tol = 60.0 / 31.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!((a - b).abs() < tol, "Q5_1 i={} a={} b={}", i, a, b);
+    }
+}
+
+/// Cross-check that our quantizers produce bytes that the PUBLIC
+/// dequant API (the one real readers use) interprets identically to
+/// our per-module test mirror.
+#[test]
+fn matches_public_dequant_q8_0() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.7).collect();
+    let bytes = q8_0::quantize(&src);
+    let mirror = q8_0::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q8_0, &bytes, None).unwrap();
+    assert_eq!(mirror, public);
+}
+
+#[test]
+fn matches_public_dequant_q4_0() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.1).collect();
+    let bytes = q4_0::quantize(&src);
+    let mirror = q4_0::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    assert_eq!(mirror, public);
+}
+
+#[test]
+fn matches_public_dequant_q4_1() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.3).collect();
+    let bytes = q4_1::quantize(&src);
+    let mirror = q4_1::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q4_1, &bytes, None).unwrap();
+    assert_eq!(mirror, public);
+}
+
+#[test]
+fn matches_public_dequant_q5_0() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.5).collect();
+    let bytes = q5_0::quantize(&src);
+    let mirror = q5_0::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q5_0, &bytes, None).unwrap();
+    assert_eq!(mirror, public);
+}
+
+#[test]
+fn matches_public_dequant_q5_1() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 1.0).collect();
+    let bytes = q5_1::quantize(&src);
+    let mirror = q5_1::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q5_1, &bytes, None).unwrap();
+    assert_eq!(mirror, public);
+}
+
+// ---- end-to-end on a real GGUF file --------------------------------------
+
+fn tiny_gguf_f32(path: &std::path::Path) {
+    let mut w = GgufWriter::new(3, 32);
+    w.add_kv(MetadataKv { key: "general.architecture".into(), value_type: 8, value: MetaValue::String("llama".into()) });
+    w.add_kv(MetadataKv { key: "llama.block_count".into(), value_type: 4, value: MetaValue::U32(1) });
+    // 64x32 weight matrix in F32 (block-aligned: 2 Q8_0 blocks per row of 32).
+    let m = 64usize;
+    let n = 32usize;
+    let mut data = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            // Smooth, well-distributed values in [-10, 10].
+            data[i * n + j] = ((i as f32) * 0.21 + (j as f32) * 0.13).sin() * 10.0;
+        }
+    }
+    let mut bytes = Vec::with_capacity(m * n * 4);
+    for v in &data { bytes.extend_from_slice(&v.to_le_bytes()); }
+    w.add_tensor("blk.0.attn_q.weight".into(), 2, [m as u64, n as u64, 1, 1], GgmlType::F32, &bytes);
+    // 1D norm (32 f32 = 128 bytes).
+    let extra: Vec<u8> = (0..32u32).flat_map(|i| ((i as f32) * 0.1).to_le_bytes()).collect();
+    w.add_tensor("blk.0.attn_norm.weight".into(), 1, [32, 1, 1, 1], GgmlType::F32, &extra);
+    // 1D embd (64 f32 = 256 bytes).
+    let embd: Vec<u8> = (0..64u32).flat_map(|i| ((i as f32) - 32.0).to_le_bytes()).collect();
+    w.add_tensor("token_embd.weight".into(), 1, [64, 1, 1, 1], GgmlType::F32, &embd);
+    let out = w.into_bytes().unwrap();
+    std::fs::write(path, &out).unwrap();
+}
+
+fn run_e2e(target: GgmlType) {
+    // Unique paths per test invocation (thread id + counter) to avoid races
+    // between cargo test's parallel test threads.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tid = format!("{:?}", std::thread::current().id());
+    let tmp_in = std::env::temp_dir().join(format!(
+        "spynaltap-qz-in-{}-{}-{}.gguf", std::process::id(), tid, n
+    ));
+    let tmp_out = std::env::temp_dir().join(format!(
+        "spynaltap-qz-out-{}-{}-{}.gguf", std::process::id(), tid, n
+    ));
+    tiny_gguf_f32(&tmp_in);
+
+    let report = quantize_gguf(&tmp_in, target, &tmp_out).expect("quantize_gguf");
+    assert_eq!(report.target, target.as_str());
+    assert_eq!(report.tensors_total, 3);
+    assert_eq!(report.tensors_quantized, 3);
+    assert_eq!(report.tensors_skipped.len(), 0);
+    assert!(report.bytes_out < report.bytes_in, "should compress: in={} out={}", report.bytes_in, report.bytes_out);
+    assert!(report.compression_ratio > 1.0, "ratio={}", report.compression_ratio);
+
+    // Re-open the output and verify dtype/byte_size for every tensor.
+    let gg = GgufFile::open(&tmp_out).expect("reopen");
+    for ti in &gg.tensors {
+        assert_eq!(ti.ggml_type, target, "tensor {} dtype mismatch", ti.name);
+        // Verify byte_size matches the per-block formula.
+        let n_elems: u64 = ti.dims.iter().take(ti.n_dims as usize).product();
+        let expected = spynaltap::formats::gguf::types::byte_size_for(n_elems, target);
+        assert_eq!(ti.byte_size, expected, "tensor {} byte_size mismatch", ti.name);
+    }
+
+    // Verify the round-trip values are within tolerance.
+    for ti in &gg.tensors {
+        let src_bytes = gg.tensor_slice(ti).expect("slice");
+        let n_elems: u64 = ti.dims.iter().take(ti.n_dims as usize).product();
+        let orig_bytes = std::fs::read(&tmp_in).unwrap();
+        let orig_gg = GgufFile::open(&tmp_in).unwrap();
+        let orig_ti = orig_gg.tensors.iter().find(|t| t.name == ti.name).unwrap();
+        let orig_data = orig_gg.tensor_slice(orig_ti).unwrap();
+        let orig_f32 = dequant::dequantize(GgmlType::F32, orig_data, None).unwrap();
+        let new_f32 = dequant::dequantize(target, src_bytes, None).unwrap();
+        assert_eq!(orig_f32.len() as u64, n_elems);
+        // For each type, max abs error is roughly (amax / grid_size).
+        let amax = orig_f32.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        let grid = match target {
+            GgmlType::Q4_0 => 8.0,
+            GgmlType::Q4_1 => 15.0,
+            GgmlType::Q5_0 => 16.0,
+            GgmlType::Q5_1 => 31.0,
+            GgmlType::Q8_0 => 127.0,
+            _ => unreachable!(),
+        };
+        let tol = amax / grid + 1.0; // +1 for f16 storage of d
+        let err = orig_f32.iter().zip(new_f32.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(err < tol, "tensor {} max err {} > tol {} (amax={})", ti.name, err, tol, amax);
+        let _ = orig_bytes;
+    }
+
+    // Verify the metadata was written.
+    let applied = gg.metadata.iter()
+        .find(|kv| kv.key == "spynaltap.quantize.applied")
+        .expect("metadata: applied");
+    match &applied.value {
+        MetaValue::Bool(true) => {}
+        other => panic!("expected Bool(true), got {:?}", other),
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&tmp_in);
+    let _ = std::fs::remove_file(&tmp_out);
+}
+
+#[test] fn e2e_quantize_q4_0() { run_e2e(GgmlType::Q4_0); }
+#[test] fn e2e_quantize_q4_1() { run_e2e(GgmlType::Q4_1); }
+#[test] fn e2e_quantize_q5_0() { run_e2e(GgmlType::Q5_0); }
+#[test] fn e2e_quantize_q5_1() { run_e2e(GgmlType::Q5_1); }
+#[test] fn e2e_quantize_q8_0() { run_e2e(GgmlType::Q8_0); }
+
+#[test]
+fn e2e_passthrough_keeps_dtypes() {
+    // Build a GGUF already in Q4_0 and re-quantize to Q4_0 -> all passthrough.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tid = format!("{:?}", std::thread::current().id());
+    let tmp_in = std::env::temp_dir().join(format!(
+        "spynaltap-qz-pt-in-{}-{}-{}.gguf", std::process::id(), tid, n
+    ));
+    let tmp_out = std::env::temp_dir().join(format!(
+        "spynaltap-qz-pt-out-{}-{}-{}.gguf", std::process::id(), tid, n
+    ));
+    tiny_gguf_f32(&tmp_in);
+    let _ = quantize_gguf(&tmp_in, GgmlType::Q4_0, &tmp_in); // nope; we want a q4_0 input
+    // Build a real Q4_0 input by quantizing f32 -> q4_0 bytes for the weight tensor.
+    let mut w = GgufWriter::new(3, 32);
+    w.add_kv(MetadataKv { key: "general.architecture".into(), value_type: 8, value: MetaValue::String("llama".into()) });
+    let m = 64usize; let n = 32usize;
+    let data: Vec<f32> = (0..m*n).map(|i| ((i as f32) * 0.1).sin() * 5.0).collect();
+    let qbytes = q8_0::quantize(&data); // use Q8_0 path for ease (works for any 32-aligned shape)
+    w.add_tensor("blk.0.attn_q.weight".into(), 2, [m as u64, n as u64, 1, 1], GgmlType::Q8_0, &qbytes);
+    let out = w.into_bytes().unwrap();
+    std::fs::write(&tmp_in, &out).unwrap();
+
+    let report = quantize_gguf(&tmp_in, GgmlType::Q8_0, &tmp_out).expect("quantize");
+    assert_eq!(report.tensors_passthrough, 1);
+    assert_eq!(report.tensors_quantized, 0);
+    assert_eq!(report.bytes_in, report.bytes_out);
+
+    let _ = std::fs::remove_file(&tmp_in);
+    let _ = std::fs::remove_file(&tmp_out);
+}

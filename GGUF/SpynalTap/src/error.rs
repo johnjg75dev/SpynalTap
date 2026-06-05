@@ -28,6 +28,9 @@ pub enum Error {
     #[error("SVD error: {0}")]
     Svd(String),
 
+    #[error("quantize error: {0}")]
+    Quantize(String),
+
     #[error("no prunable blocks found in model")]
     NoPrunableBlocks,
 

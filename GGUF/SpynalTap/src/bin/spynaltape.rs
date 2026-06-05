@@ -6,10 +6,12 @@
 
 use clap::Parser;
 use spynaltap::analysis::score::BlockRole;
+use spynaltap::formats::gguf::types::GgmlType;
 use spynaltap::formats::gguf::GgufFile;
 use spynaltap::formats::safetensors::SafetensorsFile;
 use spynaltap::model::ModelFormat;
 use spynaltap::prune::{apply_to_gguf, apply_to_safetensors, build_plan, parse_selection, Selection};
+use spynaltap::quantize::apply::quantize_gguf as quantize_gguf_apply;
 use spynaltap::svd::{
     apply_to_gguf as svd_apply_gguf, apply_to_safetensors as svd_apply_st,
     build_plan as build_svd_plan, LayerSelection, OutputDtype, RankSpec, RankSpecWithClamps,
@@ -107,6 +109,14 @@ struct Cli {
     /// Suffix appended to the original name to form the "B" (k x n) factor.
     #[arg(long, default_value = ".svd_b")]
     svd_suffix_b: String,
+
+    // ---- Quantize options -----------------------------------------------
+
+    /// Quantize every tensor in the model to this GGML block type:
+    ///   q4_0 | q4_1 | q5_0 | q5_1 | q8_0
+    /// (GGUF only in the first cut.) Requires --out.
+    #[arg(long)]
+    quantize: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -188,6 +198,21 @@ fn run_gguf(cli: Cli) -> Result<(), Error> {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_svd_report(&report);
+        }
+    }
+
+    if let Some(q_str) = &cli.quantize {
+        let out_path = cli.out.as_ref()
+            .ok_or_else(|| Error::Gguf("--quantize requires --out".into()))?
+            .clone();
+        let target = parse_quant_type(q_str)?;
+        confirm_or_exit_quantize(&cli.model, target, &out_path, cli.yes)?;
+        let report = quantize_gguf_apply(&cli.model, target, &out_path)?;
+        println!("\n=== quantize report ===");
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        } else {
+            print_quantize_report(&report);
         }
     }
     Ok(())
@@ -479,3 +504,65 @@ fn truncate(s: &str, max: usize) -> String {
 // silence "unused" on RankSpec
 #[allow(dead_code)]
 fn _rsv_keepalive(_: RankSpec) {}
+
+// ---- Quantize helpers ----------------------------------------------------
+
+fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
+    match s.to_ascii_lowercase().as_str() {
+        "q4_0" => Ok(GgmlType::Q4_0),
+        "q4_1" => Ok(GgmlType::Q4_1),
+        "q5_0" => Ok(GgmlType::Q5_0),
+        "q5_1" => Ok(GgmlType::Q5_1),
+        "q8_0" => Ok(GgmlType::Q8_0),
+        other => Err(Error::Gguf(format!(
+            "--quantize: unsupported type {other:?} (supported: q4_0, q4_1, q5_0, q5_1, q8_0)"
+        ))),
+    }
+}
+
+fn confirm_or_exit_quantize(
+    src: &std::path::Path,
+    target: GgmlType,
+    out: &std::path::Path,
+    yes: bool,
+) -> Result<(), Error> {
+    eprintln!("\n[confirm] about to quantize {} -> {} as {}",
+              src.display(), out.display(), target.as_str());
+    if yes {
+        eprintln!("           --yes set; proceeding.");
+        return Ok(());
+    }
+    eprint!("           continue? [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s).map_err(Error::Io)?;
+    let s = s.trim().to_ascii_lowercase();
+    if s == "y" || s == "yes" { Ok(()) } else {
+        eprintln!("           cancelled.");
+        std::process::exit(0);
+    }
+}
+
+fn print_quantize_report(r: &spynaltap::quantize::apply::QuantizeReport) {
+    println!("  input:           {}", r.input_path);
+    println!("  output:          {}", r.output_path);
+    println!("  target:          {}", r.target);
+    println!("  tensors:         {} total, {} quantized, {} passthrough, {} skipped",
+             r.tensors_total, r.tensors_quantized, r.tensors_passthrough, r.tensors_skipped.len());
+    println!("  bytes:           {} -> {} ({:.2} MB -> {:.2} MB)",
+             r.bytes_in, r.bytes_out,
+             r.bytes_in as f64 / 1_048_576.0,
+             r.bytes_out as f64 / 1_048_576.0);
+    println!("  compression:     {:.1}%", r.compression_ratio * 100.0);
+    println!();
+    println!("  {:<48}  {:<8}  {:<8}  {:>10}  {:>10}  {:>10}  {:>9}",
+             "tensor", "from", "to", "elems", "in B", "out B", "max err");
+    for t in r.per_tensor.iter().take(40) {
+        println!("  {:<48}  {:<8}  {:<8}  {:>10}  {:>10}  {:>10}  {:>9.4}",
+                 truncate(&t.name, 48), t.from, t.to,
+                 t.n_elements, t.bytes_in, t.bytes_out, t.max_abs_err);
+    }
+    if r.per_tensor.len() > 40 {
+        println!("  ... and {} more", r.per_tensor.len() - 40);
+    }
+}
