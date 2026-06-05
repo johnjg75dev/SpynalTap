@@ -1,0 +1,67 @@
+[package]
+name        = "spynaltap"
+version     = "0.1.0"
+edition     = "2021"
+description = "Fast AI model analyzer and transformer-block pruner (GGUF, safetensors)."
+license     = "MIT OR Apache-2.0"
+
+[lib]
+name = "spynaltap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spynaltape"
+path = "src/bin/spynaltape.rs"
+
+[features]
+default   = []
+calibrate = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+]
+
+[dependencies]
+# Core
+thiserror = "1"
+memmap2   = "0.9"
+regex     = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Output (used until we write our own faster serializer)
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Optional: calibration via candle
+candle-core         = { version = "0.7", optional = true }
+candle-nn           = { version = "0.7", optional = true }
+candle-transformers = { version = "0.7", optional = true }
+tokenizers          = { version = "0.20", optional = true }
+hf-hub              = { version = "0.3",  optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile  = "3"
+
+[[bench]]
+name    = "dequant"
+harness = false
+
+[[bench]]
+name    = "analyzer"
+harness = false
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug    = false
