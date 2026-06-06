@@ -86,7 +86,7 @@ impl SafetensorsFile {
         })
     }
 
-    pub fn metadata_str(&self, key: &str) -> Option<&str> {
+    pub fn metadata_str(&self, _key: &str) -> Option<&str> {
         // No metadata field for now; would need to keep the __metadata__ entry.
         None
     }
