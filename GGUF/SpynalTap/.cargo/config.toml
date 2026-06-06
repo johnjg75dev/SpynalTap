@@ -1,5 +1,0 @@
-# Local dev/build config: optimize for the host CPU so we can actually
-# observe the SIMD wins. The library itself uses runtime feature detection
-# (`is_x86_feature_detected!`) so the published crate is portable.
-[target.'cfg(target_arch = "x86_64")']
-rustflags = ["-C", "target-cpu=native"]
