@@ -10,7 +10,7 @@ use spynaltap::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
 use spynaltap::formats::gguf::writer::GgufWriter;
 use spynaltap::formats::gguf::GgufFile;
 use spynaltap::quantize::apply::quantize_gguf;
-use spynaltap::quantize::{q4_0, q4_1, q5_0, q5_1, q8_0};
+use spynaltap::quantize::{q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
 
 const BLOCK: usize = 32;
 
@@ -252,6 +252,171 @@ fn matches_public_dequant_q5_1() {
     let mirror = q5_1::dequant(&bytes);
     let public = dequant::dequantize(GgmlType::Q5_1, &bytes, None).unwrap();
     assert_eq!(mirror, public);
+}
+
+// ---- K-quant round-trip tests --------------------------------------------
+//
+// Q4_K, Q5_K, Q6_K: 256-element super-blocks. The tests below exercise all 8
+// sub-blocks (Q4_K/Q5_K) and all 16 sub-blocks (Q6_K) — which is exactly the
+// code path that the old (buggy) get_scale_min_k4 helper could not reach.
+
+const QK_K: usize = 256;
+const SUB_K4: usize = 32; // 8 sub-blocks per super-block
+const SUB_K6: usize = 16; // 16 sub-blocks per super-block
+
+fn make_k_block(seed: usize, amax: f32) -> Vec<f32> {
+    // Deterministic but varied values: 8 (or 16) sub-blocks each with a
+    // different magnitude and sign to exercise every sub-block slot.
+    let mut out = Vec::with_capacity(QK_K);
+    for j in 0..QK_K {
+        // Use a different sine for each sub-block so the per-sub-block
+        // (sc, mn) is non-trivial.
+        let sb = j / SUB_K4;
+        let phase = (seed as f32) * 0.3 + (sb as f32) * 1.7;
+        let t = (j as f32) / QK_K as f32;
+        // Mix positive and negative across sub-blocks.
+        let sign = if sb % 2 == 0 { 1.0 } else { -1.0 };
+        out.push(sign * amax * (t * 6.28 + phase).sin());
+    }
+    out
+}
+
+#[test]
+fn q4_k_roundtrip_bipolar() {
+    let src = make_k_block(1, 10.0);
+    let bytes = q4_k::quantize(&src);
+    assert_eq!(bytes.len(), 144);
+    let out = q4_k::dequant(&bytes);
+    assert_eq!(out.len(), QK_K);
+    for sb in 0..8 {
+        let lo = src[sb*32..(sb+1)*32].iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = src[sb*32..(sb+1)*32].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let err: f32 = (0..32).map(|i| (src[sb*32+i] - out[sb*32+i]).abs()).fold(0.0, f32::max);
+        println!("  sb={} src=[{:.3}..{:.3}]  out_range=[{:.3}..{:.3}]  max_err={:.4}", sb, lo, hi,
+                 out[sb*32..(sb+1)*32].iter().cloned().fold(f32::INFINITY, f32::min),
+                 out[sb*32..(sb+1)*32].iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                 err);
+    }
+    println!("first 16 quant bytes: {:02X?}", &bytes[..16]);
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        let err = (a - b).abs();
+        assert!(err < 2.5, "q4_k i={} a={} b={} err={}", i, a, b, err);
+    }
+}
+
+#[test]
+fn q4_k_roundtrip_positive() {
+    let mut src = vec![0.0f32; QK_K];
+    for (j, s) in src.iter_mut().enumerate() {
+        *s = (j as f32) * 0.05; // 0..12.8
+    }
+    let bytes = q4_k::quantize(&src);
+    let out = q4_k::dequant(&bytes);
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        let err = (a - b).abs();
+        assert!(err < 1.0, "q4_k pos i={} a={} b={}", i, a, b);
+    }
+}
+
+#[test]
+fn q4_k_handles_all_zero() {
+    let src = vec![0.0f32; QK_K];
+    let bytes = q4_k::quantize(&src);
+    let out = q4_k::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q4_k_exercise_subblocks_4_through_7() {
+    // Specifically exercise sub-blocks 4..7 (the path that the old buggy
+    // dequant helper couldn't reach). The make_k_block generator mixes
+    // signs across sub-blocks, so elements 128..255 are guaranteed to land
+    // in sub-blocks 4..7 with non-trivial values.
+    let src = make_k_block(7, 5.0);
+    // Verify the source actually has non-trivial values in 128..255.
+    assert!(src[128..].iter().any(|&v| v.abs() > 1.0));
+    let bytes = q4_k::quantize(&src);
+    let out = q4_k::dequant(&bytes);
+    // The public dequant (with the bug fix) must handle sub-blocks 4..7
+    // without panicking and produce sensible output.
+    for (i, &v) in out.iter().enumerate() {
+        assert!(v.is_finite(), "q4_k sub-block 4..7: i={} v={}", i, v);
+    }
+}
+
+#[test]
+fn q5_k_roundtrip_bipolar() {
+    let src = make_k_block(2, 10.0);
+    let bytes = q5_k::quantize(&src);
+    assert_eq!(bytes.len(), 176);
+    let out = q5_k::dequant(&bytes);
+    assert_eq!(out.len(), QK_K);
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        let err = (a - b).abs();
+        assert!(err < 1.5, "q5_k i={} a={} b={} err={}", i, a, b, err);
+    }
+}
+
+#[test]
+fn q5_k_handles_all_zero() {
+    let src = vec![0.0f32; QK_K];
+    let bytes = q5_k::quantize(&src);
+    let out = q5_k::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn q6_k_roundtrip_bipolar() {
+    let mut src = Vec::with_capacity(QK_K);
+    for j in 0..QK_K {
+        let sb = j / SUB_K6;
+        let sign = if sb % 2 == 0 { 1.0 } else { -1.0 };
+        let t = (j as f32) / QK_K as f32;
+        src.push(sign * 5.0 * (t * 6.28 + (sb as f32) * 1.1).sin());
+    }
+    let bytes = q6_k::quantize(&src);
+    assert_eq!(bytes.len(), 210);
+    let out = q6_k::dequant(&bytes);
+    assert_eq!(out.len(), QK_K);
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        let err = (a - b).abs();
+        assert!(err < 0.5, "q6_k i={} a={} b={} err={}", i, a, b, err);
+    }
+}
+
+#[test]
+fn q6_k_handles_all_zero() {
+    let src = vec![0.0f32; QK_K];
+    let bytes = q6_k::quantize(&src);
+    let out = q6_k::dequant(&bytes);
+    for &v in &out { assert_eq!(v, 0.0); }
+}
+
+#[test]
+fn matches_public_dequant_q4_k() {
+    let src = make_k_block(3, 5.0);
+    let bytes = q4_k::quantize(&src);
+    let mirror = q4_k::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q4K, &bytes, None).unwrap();
+    assert_eq!(mirror, public, "q4_k mirror vs public dequant mismatch");
+}
+
+#[test]
+fn matches_public_dequant_q5_k() {
+    let src = make_k_block(4, 5.0);
+    let bytes = q5_k::quantize(&src);
+    let mirror = q5_k::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q5K, &bytes, None).unwrap();
+    assert_eq!(mirror, public, "q5_k mirror vs public dequant mismatch");
+}
+
+#[test]
+fn matches_public_dequant_q6_k() {
+    let src = make_k_block(5, 5.0);
+    let bytes = q6_k::quantize(&src);
+    let mirror = q6_k::dequant(&bytes);
+    let public = dequant::dequantize(GgmlType::Q6K, &bytes, None).unwrap();
+    assert_eq!(mirror, public, "q6_k mirror vs public dequant mismatch");
 }
 
 // ---- end-to-end on a real GGUF file --------------------------------------

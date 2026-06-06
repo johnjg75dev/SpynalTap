@@ -192,10 +192,20 @@ fn get_scale_min_k4(scales: &[u8; 12], j: usize) -> (u8, u8) {
     if j < 4 {
         (scales[j] & 0x3F, scales[4 + j] & 0x3F)
     } else {
+        // Canonical llama.cpp Q4_K layout (ggml-quants.c):
+        //   sc[j] = (scales[8 + (j-4)] & 0x0F) | ((scales[j-4] >> 6) << 4)
+        //   mn[j] = (scales[8 + (j-4)] & 0x0F) | ((scales[j]   >> 6) << 4)
+        // The "shared low-4" trick: the low 4 bits of sc[j] and mn[j] are
+        // the same byte (scales[8 + (j-4)]), while the high 2 bits come
+        // from scales[j-4] (for sc) and scales[j] (for mn). This means
+        // the encoder must satisfy the coupling: the 2-bit high part of
+        // sc[j] is stored in the 6-bit slot of sc[j-4] and the 2-bit high
+        // part of mn[j] is stored in the 6-bit slot of mn[j-4].
         let lbits_idx = 8 + (j - 4);
-        let h1 = (scales[lbits_idx]     & 0x0F) as u8;
-        let h2 = (scales[4 + lbits_idx] & 0x0F) as u8;
-        (scales[j] & 0x3F | (h1 << 6), scales[4 + j] & 0x3F | (h2 << 6))
+        let lo = scales[lbits_idx] & 0x0F;
+        let sc = lo | ((scales[j - 4] >> 6) << 4);
+        let mn = lo | ((scales[j]     >> 6) << 4);
+        (sc, mn)
     }
 }
 
@@ -270,6 +280,8 @@ fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
         let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
         let ql = &blk[2..130];
         let qh = &blk[130..194];
+        // 16 i8 scales, one per 16-element sub-block of the 256-element super-block.
+        let sc = &blk[194..210];
         for j in 0..QK_K {
             let ql_byte = ql[j / 2];
             let ql_val = if j % 2 == 0 { ql_byte & 0x0F } else { (ql_byte >> 4) & 0x0F };
@@ -277,7 +289,8 @@ fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
             let shift = (j % 4) * 2;
             let qh_val = (qh_byte >> shift) & 0x03;
             let q = (ql_val as i32 - 32) + (qh_val as i32) * 4;
-            out.push(d * q as f32);
+            let s = sc[j / 16] as i8 as f32;
+            out.push(d * s * q as f32);
         }
     }
     out

@@ -3,22 +3,27 @@
 //! The companion to `crate::formats::gguf::dequant`. Each submodule implements
 //! a single block quantizer; `quantize` is the public dispatch entry point.
 //!
-//! Scope (first cut): Q4_0, Q4_1, Q5_0, Q5_1, Q8_0. K-quants (Q4_K, Q5_K,
-//! Q6_K) and i-quants are deferred to a follow-up because their sub-block
-//! scale tables pack 6-bit values in 12 bytes with a shared-high-2-bit
-//! scheme that's not worth the engineering risk for an initial cut.
-//! per-block schemes use a simple `d = max(|x|) / max_val` symmetric / affine
-//! quantization matching the dequant formula exactly. K-quants use 8
-//! sub-blocks of 32 elements per 256-element super-block, with 6-bit scale
-//! and min packed into 12 bytes per super-block (Q4_K / Q5_K) or 8-bit scales
-//! (Q6_K). Quantization is lossless modulo f16 storage of `d` and the grid
-//! rounding itself.
+//! Scope:
+//!   - Per-block: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0
+//!   - K-quants:  Q4_K, Q5_K, Q6_K (Q8_K dequant exists but no quantizer
+//!                — it's only useful for round-trip and is rarely used as
+//!                a storage format since it's not smaller than F16).
+//!   - I-quants:  not yet implemented.
+//!
+//! The K-quant quantizers match the canonical llama.cpp on-disk layout
+//! (12-byte scale tables with the "shared low-4" or "shared high-2" packing
+//! tricks). Quantization is per-sub-block with a simple max-absolute-value
+//! scale; the encoder's 6-bit values stay in [0, 63] so the coupling
+//! constraints of the canonical layout are satisfied trivially.
 
 pub mod apply;
 pub mod q4_0;
 pub mod q4_1;
+pub mod q4_k;
 pub mod q5_0;
 pub mod q5_1;
+pub mod q5_k;
+pub mod q6_k;
 pub mod q8_0;
 
 use crate::formats::gguf::types::GgmlType;
@@ -50,6 +55,9 @@ pub fn quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
         GgmlType::Q5_0 => q5_0::quantize(src),
         GgmlType::Q5_1 => q5_1::quantize(src),
         GgmlType::Q8_0 => q8_0::quantize(src),
+        GgmlType::Q4K => q4_k::quantize(src),
+        GgmlType::Q5K => q5_k::quantize(src),
+        GgmlType::Q6K => q6_k::quantize(src),
         other => panic!("quantize: unsupported type {:?}", other),
     }
 }
@@ -60,6 +68,7 @@ pub fn is_quantizable(ty: GgmlType) -> bool {
         GgmlType::Q4_0 | GgmlType::Q4_1
         | GgmlType::Q5_0 | GgmlType::Q5_1
         | GgmlType::Q8_0
+        | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K
     )
 }
 

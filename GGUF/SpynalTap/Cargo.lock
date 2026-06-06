@@ -1919,16 +1919,24 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
- "clap",
  "criterion",
  "hf-hub",
  "memmap2",
  "regex",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "tokenizers",
+]
+
+[[package]]
+name = "spynaltape"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "spynaltap",
 ]
 
 [[package]]
