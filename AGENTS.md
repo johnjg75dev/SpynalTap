@@ -9,7 +9,7 @@ Work directly inside `SpynalTap/` (the workspace root).
 
 ## Layout
 
-- `lib/` — library crate `spynaltap` v0.1.0, edition 2021, `crate-type = ["cdylib", "rlib"]`
+- `lib/` — library crate `spynaltap` v0.1.3, edition 2024, `crate-type = ["cdylib", "rlib"]`
 - `cli/` — binary crate `spynaltape` v0.1.3, edition 2024, thin `clap` wrapper over `lib`
 - `lib/tests/` — integration tests (dequant, quantize, selection_parse, svd)
 - `lib/benches/` — `criterion` benches (dequant, analyzer), `harness = false`
@@ -57,16 +57,10 @@ Root `Cargo.toml` defines:
 - `[profile.release]`: `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"`. Expect slow release links.
 - `[profile.bench]`: `inherits = "release"`, `debug = false`. Crashes in benches will have no symbols — bump to a custom profile if you need them.
 
-`.gitignore` excludes `target/`, `.cargo/`, `.idea/`, `.aiassistant/`, and `.aiignore` itself. The `.aiassistant/rules/Personality.md` file in the repo is for a different agent (Codex-style personality) and is not an OpenCode instruction file.
+`.gitignore` excludes `target/`, `.cargo/`, `.idea/`, `.aiassistant/`, and `.aiignore` itself.
 
 ## Known pre-existing failures
 
 3 K-quant roundtrip tests fail on some inputs (`q4_k_roundtrip_bipolar`,
 `q5_k_roundtrip_bipolar`, `q6_k_roundtrip_bipolar`). These are edge cases in
 the quantize/dequant path for K-quants; not caused by recent changes.
-
-## Known non-issues worth knowing
-
-- `lib/tests/Cargo.toml` is a non-standard nested manifest (duplicate of
-  `lib/Cargo.toml`). Cargo tolerates it as-is but don't add more manifests
-  under `tests/`.
