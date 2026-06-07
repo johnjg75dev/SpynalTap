@@ -286,17 +286,50 @@ pub enum OutputDtype {
     F32,
     F16,
     Bf16,
+    /// Auto-select a quantization format that matches the input tensor's
+    /// on-disk precision. Currently picks Q8_0 (best accuracy/size ratio for
+    /// factors) when the input is quantized, otherwise falls back to F16.
+    AutoQuant,
+    /// Explicit GGUF block quant type. The string form is one of
+    /// `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`, `q4_k`, `q5_k`, `q6_k`,
+    /// `q2_k`, `q3_k`, `q8_k` (matching the `--quantize` flags).
+    Ggml(crate::formats::gguf::types::GgmlType),
 }
 
 impl OutputDtype {
     pub fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let s = s.trim();
+        match s.to_ascii_lowercase().as_str() {
             "f32" | "float32" => Ok(Self::F32),
             "f16" | "float16" | "fp16" | "half" => Ok(Self::F16),
             "bf16" | "bfloat16" => Ok(Self::Bf16),
-            other => Err(Error::InvalidSvdConfig(format!(
-                "unknown dtype '{other}' (want f32/f16/bf16)"
-            ))),
+            "auto" | "autoquant" | "auto-quant" => Ok(Self::AutoQuant),
+            other => {
+                use crate::formats::gguf::types::GgmlType::*;
+                let ty = match other {
+                    "f32" => F32,
+                    "f16" => F16,
+                    "bf16" => Bf16,
+                    "q4_0" => Q4_0,
+                    "q4_1" => Q4_1,
+                    "q5_0" => Q5_0,
+                    "q5_1" => Q5_1,
+                    "q8_0" => Q8_0,
+                    "q8_1" => Q8_1,
+                    "q2_k" => Q2K,
+                    "q3_k" => Q3K,
+                    "q4_k" => Q4K,
+                    "q5_k" => Q5K,
+                    "q6_k" => Q6K,
+                    "q8_k" => Q8K,
+                    _ => {
+                        return Err(Error::InvalidSvdConfig(format!(
+                            "unknown dtype '{other}' (want f32/f16/bf16/auto/<qtype>)"
+                        )))
+                    }
+                };
+                Ok(Self::Ggml(ty))
+            }
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -304,10 +337,14 @@ impl OutputDtype {
             Self::F32 => "F32",
             Self::F16 => "F16",
             Self::Bf16 => "BF16",
+            Self::AutoQuant => "AUTO-QUANT",
+            Self::Ggml(t) => t.as_str(),
         }
     }
     pub fn is_supported_for_ggml(self) -> bool {
-        matches!(self, Self::F32 | Self::F16 | Self::Bf16)
+        // All variants produce a valid GGML tensor type (raw bytes for F*,
+        // GgmlType for the rest).
+        true
     }
 }
 
@@ -491,6 +528,14 @@ mod tests {
     fn parse_dtype() {
         assert_eq!(OutputDtype::parse("f16").unwrap(), OutputDtype::F16);
         assert_eq!(OutputDtype::parse("bf16").unwrap(), OutputDtype::Bf16);
+        assert_eq!(
+            OutputDtype::parse("auto").unwrap(),
+            OutputDtype::AutoQuant
+        );
+        assert_eq!(
+            OutputDtype::parse("q8_0").unwrap(),
+            OutputDtype::Ggml(crate::formats::gguf::types::GgmlType::Q8_0)
+        );
         assert!(OutputDtype::parse("garbage").is_err());
     }
     #[test]

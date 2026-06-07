@@ -134,9 +134,9 @@ pub fn apply_to_gguf(gg: &GgufFile, plan: &SvdPlan, dst: &Path) -> Result<SvdRep
             let b_pack = slice_rows(&b_packed, 0, effective_k);
             let approx_err = approx_error(&a_mat, &a_pack, &b_pack);
 
-            let a_bytes = encode_factors(&a_pack, plan.config.dtype, target.m, effective_k);
-            let b_bytes = encode_factors(&b_pack, plan.config.dtype, effective_k, target.n);
-            let a_ty = dtype_to_ggml(plan.config.dtype);
+            let a_bytes = encode_factors(&a_pack, plan.config.dtype, target.m, effective_k, ti.ggml_type);
+            let b_bytes = encode_factors(&b_pack, plan.config.dtype, effective_k, target.n, ti.ggml_type);
+            let a_ty = dtype_to_ggml(plan.config.dtype, ti.ggml_type);
             let a_offset = writer.data.len() as u64;
             let a_n = (target.m * effective_k) as u64;
             let a_bz = a_bytes.len() as u64;
@@ -279,18 +279,19 @@ pub fn apply_to_safetensors(st: &SafetensorsFile, plan: &SvdPlan, dst: &Path) ->
             let b_pack = slice_rows(&b_packed, 0, effective_k);
             let approx_err = approx_error(&a_mat, &a_pack, &b_pack);
 
-            let a_bytes = encode_factors(&a_pack, plan.config.dtype, target.m, effective_k);
-            let b_bytes = encode_factors(&b_pack, plan.config.dtype, effective_k, target.n);
+            let src_ggml = tensordtype_to_ggml(t.dtype);
+            let a_bytes = encode_factors(&a_pack, plan.config.dtype, target.m, effective_k, src_ggml);
+            let b_bytes = encode_factors(&b_pack, plan.config.dtype, effective_k, target.n, src_ggml);
             let dt = plan.config.dtype;
             writer.add_raw(
                 target.name_a.clone(),
-                dtype_to_tensordtype(dt),
+                dtype_to_tensordtype(dt, src_ggml),
                 vec![target.m as u64, effective_k as u64],
                 &a_bytes,
             );
             writer.add_raw(
                 target.name_b.clone(),
-                dtype_to_tensordtype(dt),
+                dtype_to_tensordtype(dt, src_ggml),
                 vec![effective_k as u64, target.n as u64],
                 &b_bytes,
             );
@@ -445,32 +446,49 @@ fn bytes_to_f32_from_bf16(bytes: &[u8]) -> Vec<f32> {
 }
 
 /// Encode a row-major f32 matrix into the requested on-disk element dtype.
-fn encode_factors(m: &Mat, dtype: OutputDtype, rows: usize, cols: usize) -> Vec<u8> {
+fn encode_factors(
+    m: &Mat,
+    dtype: OutputDtype,
+    rows: usize,
+    cols: usize,
+    src_ggml: GgmlType,
+) -> Vec<u8> {
     debug_assert_eq!(m.rows, rows);
     debug_assert_eq!(m.cols, cols);
-    match dtype {
-        OutputDtype::F32 => {
-            let mut out = Vec::with_capacity(rows * cols * 4);
-            for &v in &m.data {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-            out
-        }
-        OutputDtype::F16 => {
-            let mut out = Vec::with_capacity(rows * cols * 2);
-            for &v in &m.data {
-                out.extend_from_slice(&f32_to_f16_bits(v).to_le_bytes());
-            }
-            out
-        }
-        OutputDtype::Bf16 => {
-            let mut out = Vec::with_capacity(rows * cols * 2);
-            for &v in &m.data {
-                out.extend_from_slice(&f32_to_bf16_bits(v).to_le_bytes());
-            }
-            out
-        }
+    let resolved = match dtype {
+        OutputDtype::F32 => return encode_f32(m),
+        OutputDtype::F16 => return encode_f16(m),
+        OutputDtype::Bf16 => return encode_bf16(m),
+        OutputDtype::AutoQuant => auto_pick_quant(src_ggml),
+        OutputDtype::Ggml(t) => t,
+    };
+    if !crate::quantize::is_quantizable(resolved) {
+        // Not a quantizable block type — fall back to F16.
+        return encode_f16(m);
     }
+    crate::quantize::quantize_par(&m.data, resolved)
+}
+
+fn encode_f32(m: &Mat) -> Vec<u8> {
+    let mut out = Vec::with_capacity(m.data.len() * 4);
+    for &v in &m.data {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+fn encode_f16(m: &Mat) -> Vec<u8> {
+    let mut out = Vec::with_capacity(m.data.len() * 2);
+    for &v in &m.data {
+        out.extend_from_slice(&f32_to_f16_bits(v).to_le_bytes());
+    }
+    out
+}
+fn encode_bf16(m: &Mat) -> Vec<u8> {
+    let mut out = Vec::with_capacity(m.data.len() * 2);
+    for &v in &m.data {
+        out.extend_from_slice(&f32_to_bf16_bits(v).to_le_bytes());
+    }
+    out
 }
 
 #[inline]
@@ -507,19 +525,82 @@ fn f32_to_bf16_bits(v: f32) -> u16 {
     (rounded >> 16) as u16
 }
 
-fn dtype_to_ggml(d: OutputDtype) -> GgmlType {
+fn dtype_to_ggml(d: OutputDtype, src_ggml: GgmlType) -> GgmlType {
     match d {
         OutputDtype::F32 => GgmlType::F32,
         OutputDtype::F16 => GgmlType::F16,
         OutputDtype::Bf16 => GgmlType::Bf16,
+        OutputDtype::AutoQuant => auto_pick_quant(src_ggml),
+        OutputDtype::Ggml(t) => t,
     }
 }
 
-fn dtype_to_tensordtype(d: OutputDtype) -> TensorDtype {
-    match d {
-        OutputDtype::F32 => TensorDtype::F32,
-        OutputDtype::F16 => TensorDtype::F16,
-        OutputDtype::Bf16 => TensorDtype::Bf16,
+/// Pick a sensible quantization format for a quantized-output SVD factor.
+/// For float source tensors the SVD factors are continuous-valued, so we
+/// keep the high precision in F16 (4-byte-per-factor with 5× compression
+/// would be a worse trade than the rank reduction itself). For already-
+/// quantized sources we re-use the source precision to keep the
+/// reconstruction error in the same band.
+fn auto_pick_quant(src: GgmlType) -> GgmlType {
+    match src {
+        GgmlType::F32 | GgmlType::F16 | GgmlType::Bf16 | GgmlType::F64
+        | GgmlType::I8 | GgmlType::I16 | GgmlType::I32 | GgmlType::I64 => GgmlType::F16,
+        _ => GgmlType::Q8_0, // matches the source's accuracy tier for the common case
+    }
+}
+
+fn dtype_to_tensordtype(d: OutputDtype, src_ggml: GgmlType) -> TensorDtype {
+    use crate::model::TensorDtype;
+    match dtype_to_ggml(d, src_ggml) {
+        GgmlType::F32 => TensorDtype::F32,
+        GgmlType::F16 => TensorDtype::F16,
+        GgmlType::Bf16 => TensorDtype::Bf16,
+        GgmlType::F64 => TensorDtype::F64,
+        GgmlType::I8 => TensorDtype::I8,
+        GgmlType::I16 => TensorDtype::I16,
+        GgmlType::I32 => TensorDtype::I32,
+        GgmlType::I64 => TensorDtype::I64,
+        // Safetensors doesn't support GGUF block types; callers are expected
+        // to have already routed GGML-quant requests through the GGUF path.
+        other => TensorDtype::Unknown(other.as_str().parse().unwrap_or(0)),
+    }
+}
+
+/// Map a `TensorDtype` (safetensors) to the equivalent `GgmlType` so the
+/// auto-quant heuristic and `dtype_to_tensordtype` work uniformly across
+/// both formats. Unknown / unsupported tensor dtypes fall back to `F16`.
+fn tensordtype_to_ggml(t: TensorDtype) -> GgmlType {
+    match t {
+        TensorDtype::F32 => GgmlType::F32,
+        TensorDtype::F16 => GgmlType::F16,
+        TensorDtype::Bf16 => GgmlType::Bf16,
+        TensorDtype::F64 => GgmlType::F64,
+        TensorDtype::I8 => GgmlType::I8,
+        TensorDtype::I16 => GgmlType::I16,
+        TensorDtype::I32 => GgmlType::I32,
+        TensorDtype::I64 => GgmlType::I64,
+        TensorDtype::Q4_0 => GgmlType::Q4_0,
+        TensorDtype::Q4_1 => GgmlType::Q4_1,
+        TensorDtype::Q5_0 => GgmlType::Q5_0,
+        TensorDtype::Q5_1 => GgmlType::Q5_1,
+        TensorDtype::Q8_0 => GgmlType::Q8_0,
+        TensorDtype::Q8_1 => GgmlType::Q8_1,
+        TensorDtype::Q2K => GgmlType::Q2K,
+        TensorDtype::Q3K => GgmlType::Q3K,
+        TensorDtype::Q4K => GgmlType::Q4K,
+        TensorDtype::Q5K => GgmlType::Q5K,
+        TensorDtype::Q6K => GgmlType::Q6K,
+        TensorDtype::Q8K => GgmlType::Q8K,
+        TensorDtype::Iq2Xxs => GgmlType::Iq2Xxs,
+        TensorDtype::Iq2Xs => GgmlType::Iq2Xs,
+        TensorDtype::Iq3Xxs => GgmlType::Iq3Xxs,
+        TensorDtype::Iq3S => GgmlType::Iq3S,
+        TensorDtype::Iq4Nl => GgmlType::Iq4Nl,
+        TensorDtype::Iq4Xs => GgmlType::Iq4Xs,
+        TensorDtype::Iq1S => GgmlType::Iq1S,
+        TensorDtype::Tq1_0 => GgmlType::Tq1_0,
+        TensorDtype::Tq2_0 => GgmlType::Tq2_0,
+        TensorDtype::Unknown(_) => GgmlType::F16,
     }
 }
 

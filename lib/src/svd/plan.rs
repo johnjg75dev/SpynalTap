@@ -151,7 +151,15 @@ pub fn build_plan<M: Model + ?Sized>(model: &M, cfg: &SvdConfig) -> Result<SvdPl
         // Compute output element size for byte estimate.
         let esz = match cfg.dtype {
             crate::svd::config::OutputDtype::F32 => 4,
-            crate::svd::config::OutputDtype::F16 | crate::svd::config::OutputDtype::Bf16 => 2,
+            crate::svd::config::OutputDtype::F16
+            | crate::svd::config::OutputDtype::Bf16
+            | crate::svd::config::OutputDtype::AutoQuant => 2,
+            crate::svd::config::OutputDtype::Ggml(t) => {
+                // Quantized: 1 byte per 32 values is a safe lower-bound estimate
+                // for the compression_ratio reporting. Real byte size is
+                // computed precisely in apply.rs.
+                t.block_bytes().unwrap_or(34) as u64 / 32
+            }
         };
         let new_bytes = ((m as u64 * k as u64) + (k as u64 * n as u64)) * esz;
         targets.push(SvdTarget {
