@@ -2355,6 +2355,7 @@ dependencies = [
  "criterion",
  "hf-hub",
  "memmap2",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

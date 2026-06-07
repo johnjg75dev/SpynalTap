@@ -72,7 +72,7 @@ match ty {
 
 /// Returns true if `ty` is a quant type accepted by `quantize`.
 pub fn is_quantizable(ty: GgmlType) -> bool {
-matches!(
+    matches!(
         ty,
         GgmlType::Q2K
             | GgmlType::Q3K
@@ -87,6 +87,41 @@ matches!(
             | GgmlType::Q8_1
             | GgmlType::Q8K
     )
+}
+
+/// Parallel variant of [`quantize`]. Splits `src` into per-block chunks and
+/// quantizes each chunk in parallel via rayon, then concatenates the
+/// resulting bytes in the original order. Output is byte-identical to
+/// `quantize` because each block is independent and produces a
+/// deterministic layout. Falls back to `quantize` for single-block inputs.
+pub fn quantize_par(src: &[f32], ty: GgmlType) -> Vec<u8> {
+    use rayon::prelude::*;
+    let block = ty.block_size();
+    if block <= 1 || src.len() < block * 2 {
+        return quantize(src, ty);
+    }
+    let chunks: Vec<&[f32]> = src.chunks_exact(block).collect();
+    let parts: Vec<Vec<u8>> = match ty {
+        GgmlType::Q2K => chunks.par_iter().map(|c| q2_k::quantize(c)).collect(),
+        GgmlType::Q3K => chunks.par_iter().map(|c| q3_k::quantize(c)).collect(),
+        GgmlType::Q4_0 => chunks.par_iter().map(|c| q4_0::quantize(c)).collect(),
+        GgmlType::Q4_1 => chunks.par_iter().map(|c| q4_1::quantize(c)).collect(),
+        GgmlType::Q4K => chunks.par_iter().map(|c| q4_k::quantize(c)).collect(),
+        GgmlType::Q5_0 => chunks.par_iter().map(|c| q5_0::quantize(c)).collect(),
+        GgmlType::Q5_1 => chunks.par_iter().map(|c| q5_1::quantize(c)).collect(),
+        GgmlType::Q5K => chunks.par_iter().map(|c| q5_k::quantize(c)).collect(),
+        GgmlType::Q6K => chunks.par_iter().map(|c| q6_k::quantize(c)).collect(),
+        GgmlType::Q8_0 => chunks.par_iter().map(|c| q8_0::quantize(c)).collect(),
+        GgmlType::Q8_1 => chunks.par_iter().map(|c| q8_1::quantize(c)).collect(),
+        GgmlType::Q8K => chunks.par_iter().map(|c| q8_k::quantize(c)).collect(),
+        other => panic!("quantize_par: unsupported type {:?}", other),
+    };
+    let total: usize = parts.iter().map(|v| v.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        out.extend(p);
+    }
+    out
 }
 
 /// f32 -> binary16 bit pattern (round-to-nearest-even, handles inf/nan).

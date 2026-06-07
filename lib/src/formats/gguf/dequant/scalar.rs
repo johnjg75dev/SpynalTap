@@ -3,6 +3,9 @@
 //!
 //! All hot loops are marked `#[inline]` for the compiler; LLVM unrolls the
 //! 32-element block loops aggressively at `-O3`.
+//!
+//! For multi-block types the parallel entry point `dequantize_par` splits
+//! input bytes into per-block chunks and processes them in parallel via rayon.
 
 use super::lookup::{IQ1S_DELTA, IQ1S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
 use super::truncate_to;
@@ -106,7 +109,7 @@ pub fn bf16_to_f32(bits: u16) -> f32 {
 // -- Q4_0 ---------------------------------------------------------------------
 
 #[inline]
-fn dequant_q4_0(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q4_0(bytes: &[u8]) -> Vec<f32> {
     // 18 bytes / 32 elements: f16 d, 16 bytes of 4-bit quants
     let n_blocks = bytes.len() / 18;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -126,7 +129,7 @@ fn dequant_q4_0(bytes: &[u8]) -> Vec<f32> {
 // -- Q4_1 ---------------------------------------------------------------------
 
 #[inline]
-fn dequant_q4_1(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q4_1(bytes: &[u8]) -> Vec<f32> {
     // 20 bytes / 32 elements: f16 d, f16 m, 16 bytes of 4-bit quants
     let n_blocks = bytes.len() / 20;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -147,7 +150,7 @@ fn dequant_q4_1(bytes: &[u8]) -> Vec<f32> {
 // -- Q5_0 ---------------------------------------------------------------------
 
 #[inline]
-fn dequant_q5_0(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q5_0(bytes: &[u8]) -> Vec<f32> {
     // 22 bytes / 32 elements: f16 d, u32 qh, 16 bytes qs
     let n_blocks = bytes.len() / 22;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -170,7 +173,7 @@ fn dequant_q5_0(bytes: &[u8]) -> Vec<f32> {
 // -- Q5_1 ---------------------------------------------------------------------
 
 #[inline]
-fn dequant_q5_1(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q5_1(bytes: &[u8]) -> Vec<f32> {
     // 24 bytes / 32 elements: f16 d, f16 m, u32 qh, 16 bytes qs
     let n_blocks = bytes.len() / 24;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -194,7 +197,7 @@ fn dequant_q5_1(bytes: &[u8]) -> Vec<f32> {
 // -- Q8_0 ---------------------------------------------------------------------
 
 #[inline]
-fn dequant_q8_0(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q8_0(bytes: &[u8]) -> Vec<f32> {
     // 34 bytes / 32 elements: f16 d, 32 i8 qs
     let n_blocks = bytes.len() / 34;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -235,7 +238,7 @@ fn get_scale_min_k4(scales: &[u8; 12], j: usize) -> (u8, u8) {
 }
 
 #[inline]
-fn dequant_q4_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q4_k(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 144;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
     let mut sc = [0u8; 12];
@@ -270,7 +273,7 @@ fn get_scale_min_k5(scales: &[u8; 12], j: usize) -> (u8, u8, u8) {
 }
 
 #[inline]
-fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 176;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
     let mut sc = [0u8; 12];
@@ -298,7 +301,7 @@ fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 210;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
     for blk in bytes.chunks_exact(210) {
@@ -326,7 +329,7 @@ fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn dequant_q8_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q8_k(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 292;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
     for blk in bytes.chunks_exact(292) {
@@ -344,7 +347,7 @@ fn dequant_q8_k(bytes: &[u8]) -> Vec<f32> {
 /// Q8_1: 36 bytes / 32 elements.  f16 d, f16 _sum, 32× u8 quants.
 /// Dequant: `xi = d * qi` where qi is the u8 quant (signed via i8 cast).
 #[inline]
-fn dequant_q8_1(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q8_1(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 36;
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * 32);
@@ -375,7 +378,7 @@ fn dequant_q8_1(bytes: &[u8]) -> Vec<f32> {
 /// Dequant formula: `d * (q * sc - mn)` where
 /// `q` is the 2-bit quant value, `sc` and `mn` are per-sub-block.
 #[inline]
-fn dequant_q2_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q2_k(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 82; // 64 qs + 2 d + 16 scales
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -438,7 +441,7 @@ fn dequant_q2_k(bytes: &[u8]) -> Vec<f32> {
 /// Dequant formula: `d * q * sc` where `q` is the 3-bit quant
 /// (2 low bits from qs, 1 high bit from hmask) and `sc` is the sub-block scale.
 #[inline]
-fn dequant_q3_k(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_q3_k(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 110; // 32 hmask + 64 qs + 2 d + 12 scales
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -482,12 +485,12 @@ fn get_q3_k_scale(scales: &[u8; 12], j: usize) -> u8 {
 // -- I8 / I16 / I32 / I64 / F64 scalar types --------------------------------
 
 #[inline]
-fn scan_i8(bytes: &[u8]) -> Vec<f32> {
+pub fn scan_i8(bytes: &[u8]) -> Vec<f32> {
     bytes.iter().map(|&b| (b as i8) as f32).collect()
 }
 
 #[inline]
-fn scan_i16(bytes: &[u8]) -> Vec<f32> {
+pub fn scan_i16(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
     for c in bytes.chunks_exact(2) {
         out.push(i16::from_le_bytes([c[0], c[1]]) as f32);
@@ -496,7 +499,7 @@ fn scan_i16(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn scan_i32(bytes: &[u8]) -> Vec<f32> {
+pub fn scan_i32(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
     for c in bytes.chunks_exact(4) {
         out.push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32);
@@ -505,7 +508,7 @@ fn scan_i32(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn scan_i64(bytes: &[u8]) -> Vec<f32> {
+pub fn scan_i64(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 8);
     for c in bytes.chunks_exact(8) {
         out.push(i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32);
@@ -514,7 +517,7 @@ fn scan_i64(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn scan_f64(bytes: &[u8]) -> Vec<f32> {
+pub fn scan_f64(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 8);
     for c in bytes.chunks_exact(8) {
         out.push(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32);
@@ -528,7 +531,7 @@ fn scan_f64(bytes: &[u8]) -> Vec<f32> {
 /// the 16 4-bit values index into the KVALUES_IQ4NL non-linear table
 /// (which includes negative values, so no -8 offset is needed).
 #[inline]
-fn dequant_iq4_nl(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq4_nl(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 18;
     let mut out = Vec::with_capacity(n_blocks * 32);
     for blk in bytes.chunks_exact(18) {
@@ -550,7 +553,7 @@ fn dequant_iq4_nl(bytes: &[u8]) -> Vec<f32> {
 /// Block size: 2 + 4 + 128 = 134 bytes per 256 elements. Wait — actually
 /// the IQ4_XS block is 136 bytes. Per-block: 2 d, 2 scales_l, 1 scales_h, 1 unused, 128 qs.
 #[inline]
-fn dequant_iq4_xs(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq4_xs(bytes: &[u8]) -> Vec<f32> {
     // IQ4_XS block: d[2] scales_l[4] scales_h[2] qs[128] = 136 bytes
     const BLOCK_SIZE: usize = 136;
     let n_blocks = bytes.len() / BLOCK_SIZE;
@@ -583,7 +586,7 @@ fn dequant_iq4_xs(bytes: &[u8]) -> Vec<f32> {
 /// idx_high packed bits, plus the scale/sigs in aux32[1]).
 /// Reference: llama.cpp `dequantize_row_iq2_xxs`.
 #[inline]
-fn dequant_iq2_xxs(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq2_xxs(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 66; // 2 d + 64 qs
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -619,7 +622,7 @@ fn dequant_iq2_xxs(bytes: &[u8]) -> Vec<f32> {
 
 /// IQ2_XS block layout: 2 d (f16), 8 scales, 64 qs = 74 bytes / 256 elements.
 #[inline]
-fn dequant_iq2_xs(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq2_xs(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 74; // 2 d + 8 scales + 64 qs
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -658,7 +661,7 @@ fn dequant_iq2_xs(bytes: &[u8]) -> Vec<f32> {
 /// IQ3_XXS block layout: 2 d (f16), 64 qs (which also embeds scales/signs
 /// in the upper 4 bits of every 4th byte group) = 66 bytes / 256 elements.
 #[inline]
-fn dequant_iq3_xxs(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq3_xxs(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 98; // 2 d + 96 qs (qs+scales_and_signs)
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -701,7 +704,7 @@ fn dequant_iq3_xxs(bytes: &[u8]) -> Vec<f32> {
 
 /// IQ3_S block layout: 2 d (f16), 1 hmask[32], 32 qs, 32 signs, 4 scales = 110 bytes.
 #[inline]
-fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 110;
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -775,7 +778,7 @@ fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
 /// Actually: 2 d + 16 qh + 8 padding/qs_low = 26 bytes plus 32 bytes more
 /// (qs in 8 groups of 4 bytes for 256 elements). Final block = 50 bytes.
 #[inline]
-fn dequant_iq1_s(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_iq1_s(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 50; // 2 d + 16 qh + 32 qs
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -812,7 +815,7 @@ fn dequant_iq1_s(bytes: &[u8]) -> Vec<f32> {
 /// 2 d (f16), 32 qs (each u8 * 3^shift → 0..1..2 in steps), 4 qh (high groups).
 /// Total block = 38 bytes / 256 elements.
 #[inline]
-fn dequant_tq1_0(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_tq1_0(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 38; // 2 d + 32 qs + 4 qh
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -848,7 +851,7 @@ fn dequant_tq1_0(bytes: &[u8]) -> Vec<f32> {
 /// TQ2_0: 2-bit ternary (values -1, 0, 1). Block layout:
 /// 2 d (f16), 64 qs (each byte holds 4 × 2-bit quants) = 66 bytes / 256 elements.
 #[inline]
-fn dequant_tq2_0(bytes: &[u8]) -> Vec<f32> {
+pub fn dequant_tq2_0(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 66; // 2 d + 64 qs
     let n_blocks = bytes.len() / BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -864,3 +867,6 @@ fn dequant_tq2_0(bytes: &[u8]) -> Vec<f32> {
     }
     out
 }
+
+
+

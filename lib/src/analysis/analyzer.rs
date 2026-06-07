@@ -1,17 +1,23 @@
 //! Streaming analyzer: read each tensor's bytes (zero-copy via mmap), dequant
 //! up to `sample_per_tensor` elements, accumulate stats in a single pass.
+//!
+//! The per-tensor dequant + accumulate step is parallelized across tensors
+//! via rayon (each tensor's bytes can be read + dequantized independently).
+//! The score / recommend passes are sequential.
 
 use crate::analysis::score::{per_block_scores, BlockAnalysis};
 use crate::analysis::stats::{sparsity_eps_for, Accum, Analysis, TensorStats};
 use crate::error::Result;
 use crate::formats::gguf::dequant as gguf_dequant;
 use crate::formats::gguf::types::GgmlType;
-use crate::model::{Model, TensorDtype};
+use crate::model::{Model, Tensor, TensorDtype};
+use rayon::prelude::*;
 use std::collections::HashSet;
 
 pub struct Analyzer {
     sample_per_tensor: usize,
     keep: HashSet<String>,
+    parallel: bool,
 }
 
 impl Analyzer {
@@ -19,6 +25,7 @@ impl Analyzer {
         Self {
             sample_per_tensor: 200_000,
             keep: HashSet::new(),
+            parallel: true,
         }
     }
 
@@ -26,6 +33,7 @@ impl Analyzer {
         Self {
             sample_per_tensor: n,
             keep: HashSet::new(),
+            parallel: true,
         }
     }
 
@@ -38,42 +46,35 @@ impl Analyzer {
         self.sample_per_tensor
     }
 
+    /// Enable or disable rayon-based parallelism for the per-tensor
+    /// dequant + stats pass. Default is `true`.
+    pub fn parallel(mut self, yes: bool) -> Self {
+        self.parallel = yes;
+        self
+    }
+
+    pub fn is_parallel(&self) -> bool {
+        self.parallel
+    }
+
     pub fn analyze<M: Model + ?Sized>(&self, model: &M) -> Result<Analysis> {
         let tensors = model.tensors();
         let total_bytes: u64 = tensors.iter().map(|t| t.byte_size).sum();
         let sample = self.sample_per_tensor;
 
-        let mut per_tensor: Vec<(crate::model::Tensor, TensorStats)> =
-            Vec::with_capacity(tensors.len());
-
-        for t in tensors {
-            // Sample limit: if we don't need to look at the whole tensor, only
-            // dequant `sample` elements. This is the key streaming optimization.
-            let max_elems = if t.shape.iter().product::<u64>() <= sample as u64 {
-                None
-            } else {
-                Some(sample)
-            };
-
-            let bytes = model.read_tensor_bytes(&t.name)?;
-            let dequantized = dequant_for_dtype(t.dtype, &bytes, max_elems);
-
-            let Some(values) = dequantized else {
-                continue;
-            };
-
-            // Compute the adaptive sparsity threshold from the values' amax.
-            let amax = values.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-            let eps = sparsity_eps_for(amax);
-
-            let mut acc = Accum::new();
-            for &v in &values {
-                acc.push(v);
-            }
-            let sampled = max_elems.is_some();
-            let stats = acc.finalize(eps, sampled);
-            per_tensor.push((t.clone(), stats));
-        }
+        let per_tensor: Vec<(Tensor, TensorStats)> = if self.parallel && tensors.len() > 1 {
+            tensors
+                .par_iter()
+                .map(|t| analyze_tensor(model, t, sample))
+                .filter_map(|r| r.ok().flatten())
+                .collect()
+        } else {
+            tensors
+                .iter()
+                .map(|t| analyze_tensor(model, t, sample))
+                .filter_map(|r| r.ok().flatten())
+                .collect()
+        };
 
         let blocks = per_block_scores(&per_tensor);
         let (recommendation, recommendation_count, estimated_bytes_after_prune) =
@@ -89,6 +90,39 @@ impl Analyzer {
             total_bytes,
         })
     }
+}
+
+fn analyze_tensor<M: Model + ?Sized>(
+    model: &M,
+    t: &Tensor,
+    sample: usize,
+) -> Result<Option<(Tensor, TensorStats)>> {
+    // Sample limit: if we don't need to look at the whole tensor, only
+    // dequant `sample` elements. This is the key streaming optimization.
+    let max_elems = if t.shape.iter().product::<u64>() <= sample as u64 {
+        None
+    } else {
+        Some(sample)
+    };
+
+    let bytes = model.read_tensor_bytes(&t.name)?;
+    let dequantized = dequant_for_dtype(t.dtype, &bytes, max_elems);
+
+    let Some(values) = dequantized else {
+        return Ok(None);
+    };
+
+    // Compute the adaptive sparsity threshold from the values' amax.
+    let amax = values.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let eps = sparsity_eps_for(amax);
+
+    let mut acc = Accum::new();
+    for &v in &values {
+        acc.push(v);
+    }
+    let sampled = max_elems.is_some();
+    let stats = acc.finalize(eps, sampled);
+    Ok(Some((t.clone(), stats)))
 }
 
 fn dequant_for_dtype(

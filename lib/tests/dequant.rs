@@ -138,3 +138,20 @@ fn dequant_i8_basic() {
         assert_eq!(x, i as f32);
     }
 }
+
+#[test]
+fn dequant_par_matches_scalar() {
+    // Build a multi-block Q4_0 tensor: 32 elements × 16 blocks = 512 elements
+    let mut bytes = Vec::with_capacity(18 * 16);
+    for _ in 0..16 {
+        bytes.extend_from_slice(&0x3c00u16.to_le_bytes()); // d = 1.0
+        bytes.extend_from_slice(&[0x12u8; 16]); // 32 nibbles
+    }
+    let single = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    let par = dequant::dequantize_par(GgmlType::Q4_0, &bytes, None).unwrap();
+    assert_eq!(single.len(), par.len());
+    assert_eq!(single.len(), 512);
+    for (a, b) in single.iter().zip(par.iter()) {
+        assert!((a - b).abs() < 1e-6, "{} vs {}", a, b);
+    }
+}

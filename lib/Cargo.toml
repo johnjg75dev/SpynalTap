@@ -25,6 +25,7 @@ calibrate = [
 thiserror = "2.0.18"
 memmap2   = "0.9"
 regex     = "1"
+rayon     = "1.10"
 
 # Output (used until we write our own faster serializer)
 serde      = { version = "1", features = ["derive"] }
