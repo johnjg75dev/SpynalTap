@@ -56,7 +56,6 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
             .fold((f32::NEG_INFINITY, f32::INFINITY), |(mx, mn), &v| {
                 (mx.max(v), mn.min(v))
             });
-        eprintln!("[q4_k] block_max={} block_min={}", block_max, block_min);
         let d = if block_max == 0.0 {
             0.0
         } else {

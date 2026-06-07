@@ -113,7 +113,7 @@ struct Cli {
 
     // ---- Quantize options -----------------------------------------------
     /// Quantize every tensor in the model to this GGML block type:
-    ///   q4_0 | q4_1 | q5_0 | q5_1 | q8_0
+    ///   q2_k | q3_k | q4_0 | q4_1 | q4_k | q5_0 | q5_1 | q5_k | q6_k | q8_0 | q8_1 | q8_k
     /// (GGUF only in the first cut.) Requires --out.
     #[arg(long)]
     quantize: Option<String>,
@@ -658,13 +658,20 @@ fn _rsv_keepalive(_: RankSpec) {}
 
 fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
     match s.to_ascii_lowercase().as_str() {
+        "q2_k" => Ok(GgmlType::Q2K),
+        "q3_k" => Ok(GgmlType::Q3K),
         "q4_0" => Ok(GgmlType::Q4_0),
         "q4_1" => Ok(GgmlType::Q4_1),
+        "q4_k" => Ok(GgmlType::Q4K),
         "q5_0" => Ok(GgmlType::Q5_0),
         "q5_1" => Ok(GgmlType::Q5_1),
+        "q5_k" => Ok(GgmlType::Q5K),
+        "q6_k" => Ok(GgmlType::Q6K),
         "q8_0" => Ok(GgmlType::Q8_0),
+        "q8_1" => Ok(GgmlType::Q8_1),
+        "q8_k" => Ok(GgmlType::Q8K),
         other => Err(Error::Gguf(format!(
-            "--quantize: unsupported type {other:?} (supported: q4_0, q4_1, q5_0, q5_1, q8_0)"
+            "--quantize: unsupported type {other:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k)"
         ))),
     }
 }

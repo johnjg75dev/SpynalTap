@@ -7,6 +7,7 @@ use std::io::Write;
 
 pub struct SafetensorsWriter {
     pub tensors: Vec<WriterTensor>,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +22,20 @@ impl SafetensorsWriter {
     pub fn new() -> Self {
         Self {
             tensors: Vec::new(),
+            metadata: None,
         }
+    }
+
+    pub fn with_metadata(metadata: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            tensors: Vec::new(),
+            metadata: Some(metadata),
+        }
+    }
+
+    pub fn set_metadata(&mut self, key: &str, value: serde_json::Value) {
+        let m = self.metadata.get_or_insert_with(serde_json::Map::new);
+        m.insert(key.to_string(), value);
     }
 
     pub fn add(&mut self, t: WriterTensor) {
@@ -41,9 +55,18 @@ impl SafetensorsWriter {
     /// Build and write the file. We sort tensor names by data-offset order
     /// (which here equals the call order) and write the JSON header.
     pub fn write_to<W: Write>(&self, mut w: W) -> Result<()> {
-        // Compute data_offsets as we go, then write the JSON header.
         let mut offset: u64 = 0;
         let mut header_obj: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+
+        if let Some(ref m) = self.metadata {
+            if !m.is_empty() {
+                header_obj.insert(
+                    "__metadata__".to_string(),
+                    serde_json::to_value(m).unwrap_or_default(),
+                );
+            }
+        }
+
         for t in &self.tensors {
             let start = offset;
             let end = start + t.bytes.len() as u64;

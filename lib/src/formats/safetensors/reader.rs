@@ -25,10 +25,13 @@ pub struct SafetensorsFile {
     header_len: u64,
     pub name_to_idx: HashMap<String, usize>,
     pub tensors: Vec<Tensor>,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SafetensorsHeader {
+    #[serde(rename = "__metadata__", default)]
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(flatten)]
     entries: HashMap<String, TensorEntry>,
 }
@@ -61,6 +64,8 @@ impl SafetensorsFile {
         let header: SafetensorsHeader = serde_json::from_slice(&mmap[8..header_end])
             .map_err(|e| Error::Safetensors(format!("json header: {e}")))?;
 
+        let metadata = header.metadata;
+
         let mut name_to_idx = HashMap::with_capacity(header.entries.len());
         let mut tensors = Vec::with_capacity(header.entries.len());
         for (name, e) in header.entries {
@@ -83,12 +88,19 @@ impl SafetensorsFile {
             header_len: header_len as u64,
             name_to_idx,
             tensors,
+            metadata,
         })
     }
 
-    pub fn metadata_str(&self, _key: &str) -> Option<&str> {
-        // No metadata field for now; would need to keep the __metadata__ entry.
-        None
+    pub fn metadata_str(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .as_ref()?
+            .get(key)?
+            .as_str()
+    }
+
+    pub fn metadata_json(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.metadata.as_ref()
     }
 }
 
@@ -97,10 +109,10 @@ impl Model for SafetensorsFile {
         ModelFormat::Safetensors
     }
     fn name(&self) -> Option<&str> {
-        None
+        self.metadata_str("general.name")
     }
     fn architecture(&self) -> Option<&str> {
-        None
+        self.metadata_str("general.architecture")
     }
     fn block_count(&self) -> Option<usize> {
         // The convention is the same as GGUF: blk.N.*.
@@ -118,8 +130,24 @@ impl Model for SafetensorsFile {
     fn tensor(&self, name: &str) -> Option<&Tensor> {
         self.name_to_idx.get(name).map(|&i| &self.tensors[i])
     }
-    fn metadata(&self, _key: &str) -> Option<MetadataValue<'_>> {
-        None
+    fn metadata(&self, key: &str) -> Option<MetadataValue<'_>> {
+        let v = self.metadata.as_ref()?.get(key)?;
+        match v {
+            serde_json::Value::String(s) => Some(MetadataValue::String(s)),
+            serde_json::Value::Number(n) => {
+                if let Some(v) = n.as_u64() {
+                    Some(MetadataValue::U64(v))
+                } else if let Some(v) = n.as_i64() {
+                    Some(MetadataValue::I64(v))
+                } else if let Some(v) = n.as_f64() {
+                    Some(MetadataValue::F64(v))
+                } else {
+                    None
+                }
+            }
+            serde_json::Value::Bool(b) => Some(MetadataValue::Bool(*b)),
+            _ => None,
+        }
     }
     fn read_tensor_bytes(&self, name: &str) -> Result<Cow<'_, [u8]>> {
         let t = self

@@ -230,10 +230,13 @@ impl GgmlType {
                 | Self::Q5_0
                 | Self::Q5_1
                 | Self::Q8_0
-                | Self::Q8K
+                | Self::Q8_1
                 | Self::Q4K
                 | Self::Q5K
                 | Self::Q6K
+                | Self::Q8K
+                | Self::Q2K
+                | Self::Q3K
         )
     }
 

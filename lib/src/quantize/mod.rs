@@ -17,6 +17,8 @@
 //! constraints of the canonical layout are satisfied trivially.
 
 pub mod apply;
+pub mod q2_k;
+pub mod q3_k;
 pub mod q4_0;
 pub mod q4_1;
 pub mod q4_k;
@@ -25,6 +27,8 @@ pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
+pub mod q8_1;
+pub mod q8_k;
 
 use crate::formats::gguf::types::GgmlType;
 
@@ -49,31 +53,39 @@ pub fn quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
             ty,
         );
     }
-    match ty {
+match ty {
+        GgmlType::Q2K => q2_k::quantize(src),
+        GgmlType::Q3K => q3_k::quantize(src),
         GgmlType::Q4_0 => q4_0::quantize(src),
         GgmlType::Q4_1 => q4_1::quantize(src),
+        GgmlType::Q4K => q4_k::quantize(src),
         GgmlType::Q5_0 => q5_0::quantize(src),
         GgmlType::Q5_1 => q5_1::quantize(src),
-        GgmlType::Q8_0 => q8_0::quantize(src),
-        GgmlType::Q4K => q4_k::quantize(src),
         GgmlType::Q5K => q5_k::quantize(src),
         GgmlType::Q6K => q6_k::quantize(src),
+        GgmlType::Q8_0 => q8_0::quantize(src),
+        GgmlType::Q8_1 => q8_1::quantize(src),
+        GgmlType::Q8K => q8_k::quantize(src),
         other => panic!("quantize: unsupported type {:?}", other),
     }
 }
 
 /// Returns true if `ty` is a quant type accepted by `quantize`.
 pub fn is_quantizable(ty: GgmlType) -> bool {
-    matches!(
+matches!(
         ty,
-        GgmlType::Q4_0
+        GgmlType::Q2K
+            | GgmlType::Q3K
+            | GgmlType::Q4_0
             | GgmlType::Q4_1
+            | GgmlType::Q4K
             | GgmlType::Q5_0
             | GgmlType::Q5_1
-            | GgmlType::Q8_0
-            | GgmlType::Q4K
             | GgmlType::Q5K
             | GgmlType::Q6K
+            | GgmlType::Q8_0
+            | GgmlType::Q8_1
+            | GgmlType::Q8K
     )
 }
 
