@@ -4,6 +4,7 @@
 use crate::analysis::stats::TensorStats;
 use crate::model::Tensor;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TensorAnalysis {
@@ -22,6 +23,11 @@ pub struct BlockAnalysis {
     pub tensor_count: usize,
     pub neighbor_similarity: Option<f64>,
     pub tensors: Vec<TensorAnalysis>,
+    /// Singular-value spectra for a small selection of tensors in this
+    /// block, keyed by tensor name. Populated by the analyzer for at most
+    /// a handful of high-signal tensors; empty otherwise.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub spectra: HashMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -130,6 +136,7 @@ pub fn per_block_scores(tensors: &[(Tensor, TensorStats)]) -> Vec<BlockAnalysis>
             tensor_count: entries.len(),
             neighbor_similarity: None,
             tensors: scored,
+            spectra: HashMap::new(),
         });
     }
     out

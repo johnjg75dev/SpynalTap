@@ -23,13 +23,23 @@ pub mod analysis;
 pub mod calibrate;
 pub mod error;
 pub mod formats;
+pub mod merge;
 pub mod model;
 pub mod prune;
 pub mod quantize;
 pub mod svd;
 
-pub use analysis::{Analysis, Analyzer, BlockAnalysis, TensorAnalysis};
+pub use analysis::{
+    tensor_spectrum, Analysis, Analyzer, BlockAnalysis, Chart, ChartSeries, PerChannelStats,
+    ReportSection, TensorAnalysis, TensorStats,
+};
 pub use error::{Error, Result};
+pub use merge::{
+    apply_tying as merge_apply_tying, average_into, average_tensors, insert_block,
+    merge_experts, plan_tying, slerp_tensors, verify_tying_compatible, InsertPlan,
+    InsertResult, InsertSource, MergeStrategy, MoEMergeStrategy, MoEWeights, SlerpT,
+    TyingPlan, TyingResult, WeightFormat,
+};
 pub use model::{BlockRef, MetadataValue, Model, ModelFormat, Tensor, TensorDtype};
 pub use prune::{build_plan, parse_selection, PrunePlan, PruneReport, Selection};
 pub use quantize::{is_quantizable, quantize};

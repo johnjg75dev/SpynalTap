@@ -8,12 +8,28 @@
 //!
 //! Percentiles use a reservoir sample (≤ 65 536 floats) and are computed by
 //! sorting only that sample.
+//!
+//! Higher central moments (M3, M4) use Pébay's one-pass recurrence so the
+//! streaming `Accum` can report skewness and kurtosis without a second pass.
+//! When the tensor was sampled, finalize falls back to computing those
+//! moments from the reservoir directly (small set, exact).
 
 use crate::analysis::score::BlockAnalysis;
 use crate::model::Tensor;
 
+/// Per-channel (per-row) statistics for 2-D weight tensors.
+///
+/// `channel_means.len() == channel_stds.len() == n_channels`, where
+/// `n_channels` is the first axis length of the tensor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PerChannelStats {
+    pub n_channels: usize,
+    pub channel_means: Vec<f32>,
+    pub channel_stds: Vec<f32>,
+}
+
 /// All statistics we collect for one tensor (or one block).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TensorStats {
     pub n: u64,
     pub n_sampled: bool,
@@ -34,6 +50,9 @@ pub struct TensorStats {
     pub p50: f32,
     pub p99: f32,
     pub p999: f32,
+    pub skewness: f64,
+    pub kurtosis: f64,
+    pub per_channel: Option<PerChannelStats>,
 }
 
 pub const RESERVOIR_SIZE: usize = 65_536;
@@ -76,15 +95,25 @@ pub fn empty_stats() -> TensorStats {
         p50: 0.0,
         p99: 0.0,
         p999: 0.0,
+        skewness: 0.0,
+        kurtosis: 0.0,
+        per_channel: None,
     }
 }
 
 /// Single-pass Welford statistics. Call `push` repeatedly, then `finalize`.
+///
+/// Higher central moments (M3, M4) are tracked via Pébay's one-pass
+/// recurrence. For 2-D tensors constructed with `new_2d`, per-row sums and
+/// sum-of-squares are accumulated so the finalized `TensorStats` can carry
+/// `per_channel` mean / std.
 #[derive(Default)]
 pub struct Accum {
     n: u64,
     mean: f64,
     m2: f64,
+    m3: f64,
+    m4: f64,
     abs_sum: f64,
     abs_max: f64,
     l2: f64,
@@ -99,6 +128,15 @@ pub struct Accum {
     bucket_counts: Vec<u32>,
     reservoir: Vec<f32>,
     rng_state: u64,
+
+    // Per-channel (per-row) state for 2-D tensors.
+    is_2d: bool,
+    n_rows: usize,
+    n_cols: usize,
+    current_row: usize,
+    current_col: usize,
+    row_sums: Vec<f64>,
+    row_sumsq: Vec<f64>,
 }
 
 impl Accum {
@@ -107,6 +145,8 @@ impl Accum {
             n: 0,
             mean: 0.0,
             m2: 0.0,
+            m3: 0.0,
+            m4: 0.0,
             abs_sum: 0.0,
             abs_max: 0.0,
             l2: 0.0,
@@ -119,7 +159,26 @@ impl Accum {
             bucket_counts: vec![0u32; 1usize << N_BUCKETS_LOG2],
             reservoir: Vec::with_capacity(RESERVOIR_SIZE),
             rng_state: 0x9E37_79B9_7F4A_7C15,
+            is_2d: false,
+            n_rows: 0,
+            n_cols: 0,
+            current_row: 0,
+            current_col: 0,
+            row_sums: Vec::new(),
+            row_sumsq: Vec::new(),
         }
+    }
+
+    /// Construct an accumulator that also tracks per-row sums/sum-of-squares.
+    /// Caller is expected to push `rows * cols` values in row-major order.
+    pub fn new_2d(rows: usize, cols: usize) -> Self {
+        let mut s = Self::new();
+        s.is_2d = true;
+        s.n_rows = rows;
+        s.n_cols = cols;
+        s.row_sums = vec![0.0; rows];
+        s.row_sumsq = vec![0.0; rows];
+        s
     }
 
     #[inline]
@@ -140,9 +199,20 @@ impl Accum {
         self.n += 1;
         let xf = x as f64;
         let delta = xf - self.mean;
-        self.mean += delta / self.n as f64;
-        let delta2 = xf - self.mean;
-        self.m2 += delta * delta2;
+
+        // Pébay 2008 one-pass higher-moments update. All four accumulators
+        // (mean, M2, M3, M4) are kept in sync using only O(1) state per push.
+        let n_f = self.n as f64;
+        let delta_n = delta / n_f;
+        let delta_n2 = delta_n * delta_n;
+        let term1 = delta * delta_n * (n_f - 1.0);
+
+        self.mean += delta_n;
+        self.m4 += term1 * delta_n2 * (n_f * n_f - 3.0 * n_f + 3.0)
+            + 6.0 * delta_n2 * self.m2
+            - 4.0 * delta_n * self.m3;
+        self.m3 += term1 * delta_n * (n_f - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term1;
 
         let ax = x.abs() as f64;
         self.abs_sum += ax;
@@ -171,6 +241,19 @@ impl Accum {
             self.seen_buckets |= 1u32 << (key % 32);
         }
         self.bucket_counts[key] = self.bucket_counts[key].saturating_add(1);
+
+        // Per-channel (per-row) update. The analyzer pushes values in
+        // row-major order; we just count columns to know when a row ends.
+        if self.is_2d && self.current_row < self.n_rows {
+            let r = self.current_row;
+            self.row_sums[r] += xf;
+            self.row_sumsq[r] += xf * xf;
+            self.current_col += 1;
+            if self.current_col >= self.n_cols {
+                self.current_col = 0;
+                self.current_row += 1;
+            }
+        }
     }
 
     pub fn finalize(&mut self, sparsity_eps: f32, sampled: bool) -> TensorStats {
@@ -180,6 +263,36 @@ impl Accum {
         let abs_mean = self.abs_sum / n as f64;
         let l2 = self.l2.sqrt();
         let l1 = self.l1;
+
+        // Skewness / kurtosis: sampled tensors use the reservoir (small
+        // exact computation); unsampled tensors use the streaming Welford
+        // values that `push` has been updating.
+        let (skewness, kurtosis) = if sampled {
+            moments_from_reservoir(&self.reservoir)
+        } else {
+            moments_from_welford(self.m2, self.m3, self.m4, n)
+        };
+
+        // Per-channel (per-row) stats, only for 2-D accumulators with at
+        // least one element pushed per row.
+        let per_channel = if self.is_2d && self.n_rows > 0 {
+            let mut channel_means = Vec::with_capacity(self.n_rows);
+            let mut channel_stds = Vec::with_capacity(self.n_rows);
+            let denom = (self.n_cols as f64).max(1.0);
+            for r in 0..self.n_rows {
+                let m = self.row_sums[r] / denom;
+                let v = (self.row_sumsq[r] / denom - m * m).max(0.0);
+                channel_means.push(m as f32);
+                channel_stds.push(v.sqrt() as f32);
+            }
+            Some(PerChannelStats {
+                n_channels: self.n_rows,
+                channel_means,
+                channel_stds,
+            })
+        } else {
+            None
+        };
 
         if !self.reservoir.is_empty() {
             let rlen = self.reservoir.len() as f64;
@@ -245,10 +358,61 @@ impl Accum {
                 p50,
                 p99,
                 p999,
+                skewness,
+                kurtosis,
+                per_channel,
             };
         }
         empty_stats()
     }
+}
+
+/// Compute skewness and (excess) kurtosis from Welford's running sums.
+fn moments_from_welford(m2: f64, m3: f64, m4: f64, n: u64) -> (f64, f64) {
+    if n < 2 || m2 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let n_f = n as f64;
+    let m = m2 / n_f;
+    if m <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let m3_n = m3 / n_f;
+    let m4_n = m4 / n_f;
+    let skewness = m3_n / m.powf(1.5);
+    let kurtosis = m4_n / (m * m) - 3.0;
+    (skewness, kurtosis)
+}
+
+/// Compute skewness and (excess) kurtosis directly from a (small) sample of
+/// values. Population moments (divided by n) are used for both.
+fn moments_from_reservoir(values: &[f32]) -> (f64, f64) {
+    if values.len() < 2 {
+        return (0.0, 0.0);
+    }
+    let n = values.len() as f64;
+    let mut mean = 0.0f64;
+    for &v in values {
+        mean += v as f64;
+    }
+    mean /= n;
+    let mut m2 = 0.0f64;
+    let mut m3 = 0.0f64;
+    let mut m4 = 0.0f64;
+    for &v in values {
+        let d = (v as f64) - mean;
+        let d2 = d * d;
+        m2 += d2;
+        m3 += d2 * d;
+        m4 += d2 * d2;
+    }
+    m2 /= n;
+    m3 /= n;
+    m4 /= n;
+    if m2 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    (m3 / m2.powf(1.5), m4 / (m2 * m2) - 3.0)
 }
 
 #[inline]
@@ -283,3 +447,149 @@ pub fn sparsity_eps_for(amax: f32) -> f32 {
 /// operates on `&[Tensor]` from the Model trait.
 #[allow(dead_code)]
 pub type _TensorAlias = Tensor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nearly(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn stats_skewness_known_value() {
+        // {1,2,3,4,5} is perfectly symmetric around its mean (3.0),
+        // so the third central moment is 0 and the standardized skewness
+        // must be 0 to within numerical noise.
+        let mut acc = Accum::new();
+        for &v in &[1.0f32, 2.0, 3.0, 4.0, 5.0] {
+            acc.push(v);
+        }
+        let st = acc.finalize(1e-3, false);
+        assert!(st.skewness.abs() < 0.01, "skewness = {}", st.skewness);
+        // For a symmetric 5-point dataset, the excess kurtosis is -1.2,
+        // which is well within sanity.
+        assert!(st.kurtosis.is_finite());
+    }
+
+    #[test]
+    fn stats_kurtosis_normal() {
+        // 1024 pseudo-random samples drawn from a near-Gaussian
+        // distribution (sum of four independent sinusoids by CLT). The
+        // excess kurtosis of a near-Gaussian distribution is small.
+        let mut acc = Accum::new();
+        for i in 0..1024u32 {
+            let f = i as f64;
+            // Four sinusoids with incommensurate frequencies.
+            let a = (f * 0.013).sin();
+            let b = (f * 0.021).cos();
+            let c = (f * 0.037).sin();
+            let d = (f * 0.051).cos();
+            // Sum + scale; the sum of four sinusoids converges to a
+            // Gaussian shape under CLT.
+            let v = (a + b + c + d) * 0.5;
+            acc.push(v as f32);
+        }
+        let st = acc.finalize(1e-3, false);
+        assert!(st.kurtosis.is_finite(), "kurtosis is not finite");
+        assert!(
+            st.kurtosis.abs() < 0.5,
+            "kurtosis = {} (expected |kurtosis| < 0.5)",
+            st.kurtosis
+        );
+    }
+
+    #[test]
+    fn stats_per_channel() {
+        // 3 rows of 4 values each; known row means.
+        let rows: [[f32; 4]; 3] = [
+            [1.0, 2.0, 3.0, 4.0],   // mean = 2.5
+            [10.0, 20.0, 30.0, 40.0], // mean = 25.0
+            [-1.0, -2.0, -3.0, -4.0], // mean = -2.5
+        ];
+        let mut acc = Accum::new_2d(3, 4);
+        for r in &rows {
+            for &v in r {
+                acc.push(v);
+            }
+        }
+        let st = acc.finalize(1e-3, false);
+        let pc = st.per_channel.expect("per_channel should be Some for 2D");
+        assert_eq!(pc.n_channels, 3);
+        assert_eq!(pc.channel_means.len(), 3);
+        assert_eq!(pc.channel_stds.len(), 3);
+        let means = pc.channel_means;
+        assert!(nearly(means[0] as f64, 2.5, 1e-4));
+        assert!(nearly(means[1] as f64, 25.0, 1e-4));
+        assert!(nearly(means[2] as f64, -2.5, 1e-4));
+        // Stds should be positive (non-constant rows).
+        assert!(pc.channel_stds[0] > 0.0);
+        assert!(pc.channel_stds[1] > 0.0);
+        assert!(pc.channel_stds[2] > 0.0);
+    }
+
+    #[test]
+    fn stats_per_channel_1d_is_none() {
+        // 1-D accumulators should not produce per_channel stats.
+        let mut acc = Accum::new();
+        for &v in &[1.0f32, 2.0, 3.0, 4.0] {
+            acc.push(v);
+        }
+        let st = acc.finalize(1e-3, false);
+        assert!(st.per_channel.is_none());
+    }
+
+    #[test]
+    fn stats_reservoir_skewness() {
+        // 1000 random-ish values, sampled mode (reservoir path). Skewness
+        // must be finite (not NaN/Inf) even with sampling.
+        let mut acc = Accum::new();
+        for i in 0..1000u32 {
+            let v = (((i.wrapping_mul(2654435761)) as f32) / (u32::MAX as f32)) * 2.0 - 1.0;
+            acc.push(v);
+        }
+        let st = acc.finalize(1e-3, true);
+        assert!(st.skewness.is_finite(), "sampled skewness = {}", st.skewness);
+        assert!(st.kurtosis.is_finite(), "sampled kurtosis = {}", st.kurtosis);
+    }
+
+    #[test]
+    fn stats_serialize_roundtrip() {
+        let mut acc = Accum::new_2d(2, 3);
+        for &v in &[0.5f32, 1.5, -0.5, 2.0, 0.25, -1.0] {
+            acc.push(v);
+        }
+        let st = acc.finalize(1e-3, false);
+        let json = serde_json::to_string(&st).expect("serialize");
+        let back: TensorStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.n, st.n);
+        assert_eq!(back.n_sampled, st.n_sampled);
+        assert!((back.mean - st.mean).abs() < 1e-12);
+        assert!((back.std - st.std).abs() < 1e-12);
+        assert!((back.skewness - st.skewness).abs() < 1e-12);
+        assert!((back.kurtosis - st.kurtosis).abs() < 1e-12);
+        let pc_back = back.per_channel.expect("per_channel present");
+        let pc_orig = st.per_channel.expect("per_channel present");
+        assert_eq!(pc_back.n_channels, pc_orig.n_channels);
+        assert_eq!(pc_back.channel_means.len(), pc_orig.channel_means.len());
+        for (a, b) in pc_back.channel_means.iter().zip(&pc_orig.channel_means) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn stats_existing_fields_unchanged() {
+        // Sanity: the existing behavior is preserved when a small f32
+        // slice is pushed and finalized. min/max/mean should match.
+        let mut acc = Accum::new();
+        let vals = [-0.5f32, 0.0, 0.5, 1.0, 1.5];
+        for &v in &vals {
+            acc.push(v);
+        }
+        let st = acc.finalize(1e-3, false);
+        assert_eq!(st.n, vals.len() as u64);
+        assert!((st.mean - 0.5).abs() < 1e-6);
+        assert!((st.min - (-0.5)).abs() < 1e-6);
+        assert!((st.max - 1.5).abs() < 1e-6);
+    }
+}

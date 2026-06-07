@@ -326,6 +326,7 @@ fn build_svd_config(cli: &Cli, layer_sel: &str) -> Result<SvdConfig, Error> {
         suffix_b: cli.svd_suffix_b.clone(),
         per_layer: std::collections::BTreeMap::new(),
         per_tensor: Vec::new(),
+        adjacent: None,
     })
 }
 

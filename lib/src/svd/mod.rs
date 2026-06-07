@@ -32,7 +32,7 @@ pub mod plan;
 
 pub use apply::{apply_to_gguf, apply_to_safetensors, SvdApplied, SvdReport};
 pub use config::{
-    LayerSelection, OutputDtype, RankClamps, RankSpec, RankSpecWithClamps, SvdConfig,
-    TensorSelection, ATTN_SUFFIXES, FFN_SUFFIXES,
+    AdjacentEntry, AdjacentRole, AdjacentSelection, LayerSelection, OutputDtype, RankClamps,
+    RankSpec, RankSpecWithClamps, SvdConfig, TensorSelection, ATTN_SUFFIXES, FFN_SUFFIXES,
 };
 pub use plan::{build_plan, SkippedTensor, SvdPlan, SvdTarget};

@@ -182,7 +182,7 @@ const BK_AVX2: usize = 64;
 /// (`is_x86_feature_detected!` at the dispatch site).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn matmul_tiled_avx2(a: &Mat, b: &Mat, out: &mut Mat) {
+unsafe fn matmul_tiled_avx2(a: &Mat, b: &Mat, out: &mut Mat) { unsafe {
     use std::arch::x86_64::*;
 
     let m = a.rows;
@@ -229,7 +229,7 @@ unsafe fn matmul_tiled_avx2(a: &Mat, b: &Mat, out: &mut Mat) {
             }
         }
     }
-}
+}}
 
 /// One-sided Jacobi SVD result. `s.len() == u.cols == vt.rows`.
 ///

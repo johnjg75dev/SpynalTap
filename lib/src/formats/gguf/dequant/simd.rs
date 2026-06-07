@@ -30,7 +30,7 @@ use std::arch::x86_64::*;
 // -- F32 -> F32 (trivially a 256-bit memcpy) ---------------------------------
 
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_f32_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_f32_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     let n = bytes.len() / 4;
     let mut out: Vec<f32> = Vec::with_capacity(n);
     let mut i = 0;
@@ -51,12 +51,12 @@ unsafe fn dequant_f32_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
         out.truncate(max);
     }
     out
-}
+}}
 
 // -- F16 -> F32 (8 per instruction via F16C `_mm256_cvtph_ps`) ---------------
 
 #[target_feature(enable = "avx2,f16c")]
-unsafe fn dequant_f16_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_f16_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     let n = bytes.len() / 2;
     let mut out: Vec<f32> = Vec::with_capacity(n);
     let mut i = 0;
@@ -76,12 +76,12 @@ unsafe fn dequant_f16_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
         out.truncate(max);
     }
     out
-}
+}}
 
 // -- BF16 -> F32 (zero-extend to i32, shift left 16, reinterpret) ------------
 
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_bf16_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_bf16_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     let n = bytes.len() / 2;
     let mut out: Vec<f32> = Vec::with_capacity(n);
     let mut i = 0;
@@ -104,12 +104,12 @@ unsafe fn dequant_bf16_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
         out.truncate(max);
     }
     out
-}
+}}
 
 // -- Q4_0 (32 elements / 18 bytes) -------------------------------------------
 
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_q4_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_q4_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     let n_blocks = bytes.len() / 18;
     let mut out: Vec<f32> = Vec::with_capacity(n_blocks * 32);
     let mask8 = _mm_set1_epi8(0x0F);
@@ -158,28 +158,28 @@ unsafe fn dequant_q4_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
         out.truncate(max);
     }
     out
-}
+}}
 
 // -- Q8_0 (32 elements / 34 bytes) -------------------------------------------
 
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_q8_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_q8_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     dequant_q8_block_avx2(bytes, max, 34, 2)
-}
+}}
 
 // -- Q8_1 (32 elements / 36 bytes) -------------------------------------------
 // Identical to Q8_0 except the block header is 4 bytes (d + sum) instead of 2.
 
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_q8_1_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+unsafe fn dequant_q8_1_avx2(bytes: &[u8], max: usize) -> Vec<f32> { unsafe {
     dequant_q8_block_avx2(bytes, max, 36, 4)
-}
+}}
 
 /// Shared AVX2 dequant for Q8_0 / Q8_1 block formats.
 /// `stride` is bytes per block (34 for Q8_0, 36 for Q8_1).
 /// `qs_off` is offset to the byte array of 32 i8 quants (2 for Q8_0, 4 for Q8_1).
 #[target_feature(enable = "avx2")]
-unsafe fn dequant_q8_block_avx2(bytes: &[u8], max: usize, stride: usize, qs_off: usize) -> Vec<f32> {
+unsafe fn dequant_q8_block_avx2(bytes: &[u8], max: usize, stride: usize, qs_off: usize) -> Vec<f32> { unsafe {
     let n_blocks = bytes.len() / stride;
     let mut out: Vec<f32> = Vec::with_capacity(n_blocks * 32);
 
@@ -210,4 +210,4 @@ unsafe fn dequant_q8_block_avx2(bytes: &[u8], max: usize, stride: usize, qs_off:
         out.truncate(max);
     }
     out
-}
+}}

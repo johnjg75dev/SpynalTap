@@ -44,6 +44,151 @@ use crate::error::{Error, Result};
 use regex::Regex;
 use std::collections::BTreeMap;
 
+/// Tensor-family token used by `AdjacentSelection`. Each variant maps to a
+/// 2-D weight suffix like `.attn_q.weight` (see `ATTN_SUFFIXES` / `FFN_SUFFIXES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdjacentRole {
+    AttnQ,
+    AttnK,
+    AttnV,
+    AttnOutput,
+    FfnUp,
+    FfnDown,
+    FfnGate,
+    FfnGateUp,
+}
+
+impl AdjacentRole {
+    /// Lowercase token used in the selection grammar.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AttnQ => "attn_q",
+            Self::AttnK => "attn_k",
+            Self::AttnV => "attn_v",
+            Self::AttnOutput => "attn_output",
+            Self::FfnUp => "ffn_up",
+            Self::FfnDown => "ffn_down",
+            Self::FfnGate => "ffn_gate",
+            Self::FfnGateUp => "ffn_gate_up",
+        }
+    }
+
+    /// Parse a single role token. Returns `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "attn_q" => Some(Self::AttnQ),
+            "attn_k" => Some(Self::AttnK),
+            "attn_v" => Some(Self::AttnV),
+            "attn_output" => Some(Self::AttnOutput),
+            "ffn_up" => Some(Self::FfnUp),
+            "ffn_down" => Some(Self::FfnDown),
+            "ffn_gate" => Some(Self::FfnGate),
+            "ffn_gate_up" => Some(Self::FfnGateUp),
+            _ => None,
+        }
+    }
+}
+
+/// One `(role, block_offset)` entry in an `AdjacentSelection`.
+///
+/// `offset` is added to the *primary* block index to compute the
+/// adjacent target's block. `0` means "same block", `1` means "next block",
+/// `-1` means "previous block".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdjacentEntry {
+    pub role: AdjacentRole,
+    pub offset: i32,
+}
+
+/// User-supplied list of "adjacent" tensor targets to compress alongside
+/// the primary selection.
+///
+/// Grammar:
+/// ```text
+///   <role>[+<role>...][+N|-N]
+///
+///   role  := attn_q | attn_k | attn_v | attn_output
+///         |  ffn_up | ffn_down | ffn_gate | ffn_gate_up
+///   N     := signed integer offset applied to the block index
+///           of the most recent role (default 0).
+///
+///   ""    — no adjacent selection (returns Ok(None) from parse).
+/// ```
+///
+/// Examples:
+///   `attn_v`          — same-block attn_v
+///   `attn_v+1`        — next-block attn_v
+///   `attn_v-1`        — previous-block attn_v
+///   `ffn_gate-2+ffn_up+1` — ffn_gate two blocks back, ffn_up one ahead
+#[derive(Debug, Clone, Default)]
+pub struct AdjacentSelection {
+    pub entries: Vec<AdjacentEntry>,
+}
+
+impl AdjacentSelection {
+    /// Parse a string into an `AdjacentSelection`. Returns `Ok(None)` for
+    /// the empty string (which is the "no adjacent" default).
+    pub fn parse(s: &str) -> Result<Option<Self>> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Ok(None);
+        }
+        let mut entries: Vec<AdjacentEntry> = Vec::new();
+        for token in s.split('+') {
+            if token.is_empty() {
+                return Err(Error::InvalidSvdConfig(format!(
+                    "empty role in adjacent selection '{s}' (stray '+'?)"
+                )));
+            }
+            // Bare integer: an offset applied to the most recent role.
+            if let Ok(offset) = token.parse::<i32>() {
+                let last = entries.last_mut().ok_or_else(|| {
+                    Error::InvalidSvdConfig(format!(
+                        "offset '{token}' without preceding role in adjacent selection '{s}'"
+                    ))
+                })?;
+                last.offset = offset;
+                continue;
+            }
+            // Role token, possibly with a negative offset suffix
+            // (e.g. `attn_v-1`, `ffn_gate_up-2`). Positive offsets are
+            // expressed via the `+` separator, so they never appear here.
+            // We keep the leading `-` so `offset_str` parses as a signed int.
+            let (role_name, offset_str) = match token.find('-') {
+                Some(idx) => (&token[..idx], &token[idx..]),
+                None => (token, ""),
+            };
+            let role = AdjacentRole::parse(role_name).ok_or_else(|| {
+                Error::InvalidSvdConfig(format!(
+                    "unknown role '{role_name}' in adjacent selection '{s}' \
+                     (want attn_q, attn_k, attn_v, attn_output, \
+                     ffn_up, ffn_down, ffn_gate, ffn_gate_up)"
+                ))
+            })?;
+            if role_name.is_empty() {
+                return Err(Error::InvalidSvdConfig(format!(
+                    "missing role before '-' in adjacent selection '{s}'"
+                )));
+            }
+            let offset: i32 = if offset_str.is_empty() {
+                0
+            } else {
+                offset_str.parse().map_err(|_| {
+                    Error::InvalidSvdConfig(format!(
+                        "bad offset '{offset_str}' for role '{role_name}' \
+                         in adjacent selection '{s}'"
+                    ))
+                })?
+            };
+            entries.push(AdjacentEntry { role, offset });
+        }
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self { entries }))
+    }
+}
+
 /// Which layers (transformer blocks) the SVD should target.
 #[derive(Debug, Clone)]
 pub enum LayerSelection {
@@ -373,6 +518,11 @@ pub struct SvdConfig {
     pub per_layer: BTreeMap<i32, RankSpecWithClamps>,
     /// Per-tensor-suffix rank overrides (matched substring -> rank spec).
     pub per_tensor: Vec<(String, RankSpecWithClamps)>,
+    /// Optional list of "adjacent" tensor targets (different role and/or
+    /// different block) to compress alongside the primary selection.
+    /// `None` (the default) preserves the original behavior of only
+    /// targeting the layer + tensor filters.
+    pub adjacent: Option<AdjacentSelection>,
 }
 
 impl Default for SvdConfig {
@@ -394,6 +544,7 @@ impl Default for SvdConfig {
             suffix_b: ".svd_b".into(),
             per_layer: BTreeMap::new(),
             per_tensor: Vec::new(),
+            adjacent: None,
         }
     }
 }

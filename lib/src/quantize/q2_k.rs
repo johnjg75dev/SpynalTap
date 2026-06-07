@@ -11,7 +11,6 @@
 //! Dequant formula: x = d * (q * sc - mn)
 
 use crate::formats::gguf::dequant;
-use crate::formats::gguf::dequant::f16_to_f32;
 use crate::formats::gguf::types::GgmlType;
 use crate::quantize::f32_to_f16_bits;
 

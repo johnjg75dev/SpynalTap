@@ -5,14 +5,22 @@
 //! via rayon (each tensor's bytes can be read + dequantized independently).
 //! The score / recommend passes are sequential.
 
-use crate::analysis::score::{per_block_scores, BlockAnalysis};
+use crate::analysis::score::{classify, per_block_scores, score_tensor, BlockAnalysis};
+use crate::analysis::spectrum::tensor_spectrum;
 use crate::analysis::stats::{sparsity_eps_for, Accum, Analysis, TensorStats};
 use crate::error::Result;
 use crate::formats::gguf::dequant as gguf_dequant;
 use crate::formats::gguf::types::GgmlType;
 use crate::model::{Model, Tensor, TensorDtype};
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Hard cap on the number of spectra stored in an `Analysis`. Keeps the
+/// output report and the serialized JSON bounded regardless of model size.
+const MAX_SPECTRA_PER_ANALYSIS: usize = 12;
+const SPECTRA_PRUNABLE: usize = 8;
+const SPECTRA_NON_PRUNABLE: usize = 4;
+const SPECTRA_SVD_MAX_ELEMS: usize = 64;
 
 pub struct Analyzer {
     sample_per_tensor: usize,
@@ -62,21 +70,35 @@ impl Analyzer {
         let total_bytes: u64 = tensors.iter().map(|t| t.byte_size).sum();
         let sample = self.sample_per_tensor;
 
-        let per_tensor: Vec<(Tensor, TensorStats)> = if self.parallel && tensors.len() > 1 {
-            tensors
-                .par_iter()
-                .map(|t| analyze_tensor(model, t, sample))
-                .filter_map(|r| r.ok().flatten())
-                .collect()
-        } else {
-            tensors
-                .iter()
-                .map(|t| analyze_tensor(model, t, sample))
-                .filter_map(|r| r.ok().flatten())
-                .collect()
-        };
+        // Per-tensor result: the Tensor itself, the stats, and the
+        // dequantized sample (kept around so we can compute a few
+        // spectra without re-reading + re-dequantizing the file).
+        let per_tensor: Vec<(Tensor, TensorStats, Vec<f32>)> =
+            if self.parallel && tensors.len() > 1 {
+                tensors
+                    .par_iter()
+                    .map(|t| analyze_tensor(model, t, sample))
+                    .filter_map(|r| r.ok().flatten())
+                    .collect()
+            } else {
+                tensors
+                    .iter()
+                    .map(|t| analyze_tensor(model, t, sample))
+                    .filter_map(|r| r.ok().flatten())
+                    .collect()
+            };
 
-        let blocks = per_block_scores(&per_tensor);
+        // `per_block_scores` only needs the Tensor + stats, so build a
+        // thin view for it.
+        let per_tensor_view: Vec<(Tensor, TensorStats)> = per_tensor
+            .iter()
+            .map(|(t, s, _)| (t.clone(), s.clone()))
+            .collect();
+        let mut blocks = per_block_scores(&per_tensor_view);
+
+        // Populate spectra for a small selection of high-signal tensors.
+        populate_spectra(&mut blocks, &per_tensor);
+
         let (recommendation, recommendation_count, estimated_bytes_after_prune) =
             recommend(&blocks, total_bytes);
 
@@ -96,7 +118,7 @@ fn analyze_tensor<M: Model + ?Sized>(
     model: &M,
     t: &Tensor,
     sample: usize,
-) -> Result<Option<(Tensor, TensorStats)>> {
+) -> Result<Option<(Tensor, TensorStats, Vec<f32>)>> {
     // Sample limit: if we don't need to look at the whole tensor, only
     // dequant `sample` elements. This is the key streaming optimization.
     let max_elems = if t.shape.iter().product::<u64>() <= sample as u64 {
@@ -116,13 +138,25 @@ fn analyze_tensor<M: Model + ?Sized>(
     let amax = values.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     let eps = sparsity_eps_for(amax);
 
-    let mut acc = Accum::new();
+    // 2-D tensors carry per-row stats (axis 0 reduction).
+    let is_2d = t.shape.len() == 2;
+    let mut acc = if is_2d {
+        let rows = t.shape[0] as usize;
+        let cols = if t.shape.len() >= 2 {
+            t.shape[1] as usize
+        } else {
+            0
+        };
+        Accum::new_2d(rows.max(1), cols.max(1))
+    } else {
+        Accum::new()
+    };
     for &v in &values {
         acc.push(v);
     }
     let sampled = max_elems.is_some();
     let stats = acc.finalize(eps, sampled);
-    Ok(Some((t.clone(), stats)))
+    Ok(Some((t.clone(), stats, values)))
 }
 
 fn dequant_for_dtype(
@@ -171,4 +205,241 @@ fn recommend(blocks: &[BlockAnalysis], total_bytes: u64) -> (Vec<i32>, usize, u6
     let recommended: Vec<i32> = prunable.iter().take(n).map(|b| b.index).collect();
     let saved: u64 = prunable.iter().take(n).map(|b| b.total_bytes).sum();
     (recommended, n, total_bytes.saturating_sub(saved))
+}
+
+/// Compute spectra for a small selection of tensors and attach them to the
+/// corresponding `BlockAnalysis` entries.
+///
+/// Selection:
+///   * Top-`SPECTRA_PRUNABLE` prunable tensors (role == Block), ranked by
+///     the per-tensor removable score.
+///   * `SPECTRA_NON_PRUNABLE` non-prunable tensors, taken as a stride-based
+///     pseudo-random sample for determinism.
+///   * At most `MAX_SPECTRA_PER_ANALYSIS` spectra overall.
+fn populate_spectra(
+    blocks: &mut [BlockAnalysis],
+    per_tensor: &[(Tensor, TensorStats, Vec<f32>)],
+) {
+    if per_tensor.is_empty() {
+        return;
+    }
+
+    // Map tensor name -> block index (for attaching spectra later).
+    let mut name_to_block: HashMap<String, usize> = HashMap::new();
+    for (bi, b) in blocks.iter().enumerate() {
+        for ta in &b.tensors {
+            name_to_block.insert(ta.name.clone(), bi);
+        }
+    }
+
+    // Split into prunable vs non-prunable.
+    let mut prunable: Vec<&(Tensor, TensorStats, Vec<f32>)> = Vec::new();
+    let mut non_prunable: Vec<&(Tensor, TensorStats, Vec<f32>)> = Vec::new();
+    for entry in per_tensor {
+        let (role, _, _) = classify(&entry.0.name);
+        if role.is_prunable() {
+            prunable.push(entry);
+        } else {
+            non_prunable.push(entry);
+        }
+    }
+
+    // Prunable: top-N by per-tensor removable score, descending.
+    prunable.sort_by(|a, b| {
+        let sa = score_tensor(&a.0.name, &a.1);
+        let sb = score_tensor(&b.0.name, &b.1);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n_prunable = prunable.len().min(SPECTRA_PRUNABLE);
+
+    // Non-prunable: stride-based deterministic sample so reports are
+    // reproducible across runs.
+    let n_non_prunable_target = non_prunable.len().min(SPECTRA_NON_PRUNABLE);
+    let stride = if non_prunable.is_empty() || n_non_prunable_target == 0 {
+        1
+    } else {
+        (non_prunable.len() / n_non_prunable_target).max(1)
+    };
+    let non_prunable_sample: Vec<&(Tensor, TensorStats, Vec<f32>)> = non_prunable
+        .iter()
+        .step_by(stride)
+        .take(n_non_prunable_target)
+        .copied()
+        .collect();
+
+    let mut spectra_count = 0usize;
+    for entry in prunable
+        .iter()
+        .take(n_prunable)
+        .chain(non_prunable_sample.iter())
+    {
+        if spectra_count >= MAX_SPECTRA_PER_ANALYSIS {
+            break;
+        }
+        let (t, _, values) = entry;
+        if t.shape.len() != 2 {
+            continue;
+        }
+        let m = t.shape[0] as usize;
+        let n = t.shape[1] as usize;
+        let Some(spec) = tensor_spectrum(values, m, n, Some(SPECTRA_SVD_MAX_ELEMS)) else {
+            continue;
+        };
+        if let Some(&bi) = name_to_block.get(&t.name) {
+            blocks[bi].spectra.insert(t.name.clone(), spec);
+            spectra_count += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::model::{MetadataValue, Model, ModelFormat};
+    use std::borrow::Cow;
+
+    struct FakeModel {
+        tensors: Vec<Tensor>,
+        bytes: HashMap<String, Vec<u8>>,
+    }
+
+    impl FakeModel {
+        fn new(tensors: Vec<(String, Vec<u64>, Vec<f32>)>) -> Self {
+            let mut ts = Vec::with_capacity(tensors.len());
+            let mut bytes = HashMap::new();
+            for (name, shape, data) in tensors {
+                let elems: u64 = shape.iter().product();
+                let byte_size = elems * 4;
+                let mut buf = Vec::with_capacity(data.len() * 4);
+                for v in &data {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+                ts.push(Tensor {
+                    name: name.clone(),
+                    dtype: TensorDtype::F32,
+                    shape,
+                    byte_size,
+                    data_offset: 0,
+                });
+                bytes.insert(name, buf);
+            }
+            Self {
+                tensors: ts,
+                bytes,
+            }
+        }
+    }
+
+    impl Model for FakeModel {
+        fn format(&self) -> ModelFormat {
+            ModelFormat::Gguf
+        }
+        fn name(&self) -> Option<&str> {
+            Some("fake")
+        }
+        fn architecture(&self) -> Option<&str> {
+            Some("llama")
+        }
+        fn block_count(&self) -> Option<usize> {
+            None
+        }
+        fn tensors(&self) -> &[Tensor] {
+            &self.tensors
+        }
+        fn tensor(&self, name: &str) -> Option<&Tensor> {
+            self.tensors.iter().find(|t| t.name == name)
+        }
+        fn metadata(&self, _: &str) -> Option<MetadataValue<'_>> {
+            None
+        }
+        fn read_tensor_bytes(&self, name: &str) -> Result<Cow<'_, [u8]>> {
+            self.bytes
+                .get(name)
+                .map(|v| Cow::Borrowed(v.as_slice()))
+                .ok_or_else(|| Error::TensorNotFound(name.to_string()))
+        }
+    }
+
+    fn f32_data(rows: usize, cols: usize, seed: u32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(rows * cols);
+        for i in 0..(rows * cols) {
+            let v = (((i as u32).wrapping_add(seed).wrapping_mul(2654435761)) as f32)
+                / (u32::MAX as f32);
+            out.push(v * 2.0 - 1.0);
+        }
+        out
+    }
+
+    #[test]
+    fn analyzer_populates_spectra() {
+        // Build a model with several prunable block tensors plus a few
+        // non-prunable ones (embed, output). All F32, all 2-D.
+        let mut entries: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+        for blk in 0..3 {
+            entries.push((
+                format!("blk.{blk}.attn_q.weight"),
+                vec![8, 8],
+                f32_data(8, 8, blk * 100),
+            ));
+            entries.push((
+                format!("blk.{blk}.attn_v.weight"),
+                vec![8, 8],
+                f32_data(8, 8, blk * 100 + 1),
+            ));
+        }
+        entries.push((
+            "token_embd.weight".into(),
+            vec![8, 8],
+            f32_data(8, 8, 999),
+        ));
+        entries.push((
+            "output.weight".into(),
+            vec![8, 8],
+            f32_data(8, 8, 998),
+        ));
+
+        let m = FakeModel::new(entries);
+        let analysis = Analyzer::with_sample_per_tensor(200_000).analyze(&m).unwrap();
+
+        // Spectra must exist and the total count must be <= 12.
+        let total: usize = analysis.blocks.iter().map(|b| b.spectra.len()).sum();
+        assert!(total <= MAX_SPECTRA_PER_ANALYSIS, "got {total} spectra");
+        // With 6 prunable + 2 non-prunable we expect at least 2 spectra
+        // (prunable cap is 8, non-prunable cap is 4) -- but we don't pin
+        // the exact number, only the upper bound.
+        assert!(total > 0, "expected at least one spectrum");
+    }
+
+    #[test]
+    fn analyzer_spectra_bounded_when_many_blocks() {
+        // 20 prunable tensors -> still <= 8 prunable + 4 non-prunable = 12.
+        let mut entries: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+        for blk in 0..10 {
+            entries.push((
+                format!("blk.{blk}.attn_q.weight"),
+                vec![6, 6],
+                f32_data(6, 6, blk * 11),
+            ));
+        }
+        entries.push((
+            "token_embd.weight".into(),
+            vec![6, 6],
+            f32_data(6, 6, 7),
+        ));
+        entries.push((
+            "output.weight".into(),
+            vec![6, 6],
+            f32_data(6, 6, 9),
+        ));
+        entries.push((
+            "norm.weight".into(),
+            vec![6, 6],
+            f32_data(6, 6, 11),
+        ));
+        let m = FakeModel::new(entries);
+        let analysis = Analyzer::with_sample_per_tensor(200_000).analyze(&m).unwrap();
+        let total: usize = analysis.blocks.iter().map(|b| b.spectra.len()).sum();
+        assert!(total <= MAX_SPECTRA_PER_ANALYSIS, "got {total}");
+    }
 }
