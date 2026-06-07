@@ -6,13 +6,13 @@
 //!  * the metadata is correct (rank, shape, output dtype);
 //!  * the reconstruction `A ≈ a * b` is faithful within the rank.
 
-use spynaltap::svd::config::{
+use crate::svd::config::{
     LayerSelection, OutputDtype, RankClamps, RankSpec, RankSpecWithClamps, SvdConfig,
     TensorSelection,
 };
-use spynaltap::svd::linalg::{pack_lowrank, rank_for_energy, svd_jacobi, svd_randomized, Mat};
-use spynaltap::svd::plan::build_plan;
-use spynaltap::Model;
+use crate::svd::linalg::{pack_lowrank, rank_for_energy, svd_jacobi, svd_randomized, Mat};
+use crate::svd::plan::build_plan;
+use crate::Model;
 use std::path::PathBuf;
 
 // ---- config parsing ------------------------------------------------------
@@ -244,8 +244,8 @@ fn factor_names_default() {
 // ---- end-to-end on a real GGUF file -------------------------------------
 
 fn tiny_gguf_with_attn_q(path: &std::path::Path) {
-    use spynaltap::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
-    use spynaltap::formats::gguf::writer::GgufWriter;
+    use crate::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
+    use crate::formats::gguf::writer::GgufWriter;
 
     let mut w = GgufWriter::new(3, 32);
     w.add_kv(MetadataKv {
@@ -308,7 +308,7 @@ fn tiny_gguf_with_attn_q(path: &std::path::Path) {
 fn apply_to_gguf_writes_expected_structure() {
     let tmp = std::env::temp_dir().join(format!("spynaltap-svd-{}.gguf", std::process::id()));
     tiny_gguf_with_attn_q(&tmp);
-    let gg = spynaltap::formats::gguf::GgufFile::open(&tmp).unwrap();
+    let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
     let mut cfg = SvdConfig::default();
     cfg.layers = LayerSelection::AllMlp;
     cfg.tensors = TensorSelection::Attn;
@@ -325,7 +325,7 @@ fn apply_to_gguf_writes_expected_structure() {
     assert_eq!(plan.targets[0].k, 2);
 
     let out: PathBuf = tmp.with_extension("svd.gguf");
-    let report = spynaltap::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
+    let report = crate::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
     assert_eq!(report.applied.len(), 1);
     let a = &report.applied[0];
     assert_eq!(a.m, 8);
@@ -338,7 +338,7 @@ fn apply_to_gguf_writes_expected_structure() {
     );
 
     // Re-open and check structure.
-    let out_gg = spynaltap::formats::gguf::GgufFile::open(&out).unwrap();
+    let out_gg = crate::formats::gguf::GgufFile::open(&out).unwrap();
     let names: Vec<&str> = out_gg.tensors.iter().map(|t| t.name.as_str()).collect();
     assert!(
         !names.contains(&"blk.0.attn_q.weight"),
@@ -366,7 +366,7 @@ fn apply_to_gguf_writes_expected_structure() {
 fn apply_to_gguf_preserves_non_targets() {
     let tmp = std::env::temp_dir().join(format!("spynaltap-svd-keep-{}.gguf", std::process::id()));
     tiny_gguf_with_attn_q(&tmp);
-    let gg = spynaltap::formats::gguf::GgufFile::open(&tmp).unwrap();
+    let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
     let mut cfg = SvdConfig::default();
     cfg.layers = LayerSelection::AllMlp;
     cfg.tensors = TensorSelection::Attn;
@@ -378,8 +378,8 @@ fn apply_to_gguf_preserves_non_targets() {
     cfg.min_dim = 4;
     let plan = build_plan(&gg, &cfg).unwrap();
     let out: PathBuf = tmp.with_extension("keep.gguf");
-    spynaltap::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
-    let out_gg = spynaltap::formats::gguf::GgufFile::open(&out).unwrap();
+    crate::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
+    let out_gg = crate::formats::gguf::GgufFile::open(&out).unwrap();
     // norm tensor bytes should round-trip
     let src_bytes = gg
         .read_tensor_bytes("blk.0.attn_norm.weight")

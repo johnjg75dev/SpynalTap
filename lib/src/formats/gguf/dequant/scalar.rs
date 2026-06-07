@@ -264,15 +264,6 @@ pub fn dequant_q4_k(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[inline]
-fn get_scale_min_k5(scales: &[u8; 12], j: usize) -> (u8, u8, u8) {
-    let sc_l = scales[j] & 0x3F;
-    let mn_l = scales[4 + j] & 0x3F;
-    let sc_h = (scales[8 + (j >> 2)] >> ((j & 3) * 2)) & 3;
-    let mn_h = (scales[9 + (j >> 2)] >> ((j & 3) * 2)) & 3;
-    (sc_l | (sc_h << 6), mn_l | (mn_h << 6), 0)
-}
-
-#[inline]
 pub fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
     let n_blocks = bytes.len() / 176;
     let mut out = Vec::with_capacity(n_blocks * QK_K);
@@ -285,7 +276,7 @@ pub fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
         let qs = &blk[48..176];
         for j in 0..QK_K {
             let sub = j / 32;
-            let (sc1, mn1, _) = get_scale_min_k5(&sc, sub);
+            let (sc1, mn1) = get_scale_min_k4(&sc, sub);
             let d_sc = d * sc1 as f32;
             let m_sc = dmin * mn1 as f32;
             let h = ((qh[j / 8] >> (j % 8)) & 1) as u8;
@@ -320,7 +311,7 @@ pub fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
             let qh_byte = qh[j / 4];
             let shift = (j % 4) * 2;
             let qh_val = (qh_byte >> shift) & 0x03;
-            let q = (ql_val as i32 - 32) + (qh_val as i32) * 4;
+            let q = ((ql_val | (qh_val << 4)) as i32) - 32;
             let s = sc[j / 16] as i8 as f32;
             out.push(d * s * q as f32);
         }

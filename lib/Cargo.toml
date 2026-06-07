@@ -8,7 +8,8 @@ license     = "MIT OR Apache-2.0"
 [lib]
 name = "spynaltap"
 path = "src/lib.rs"
-crate-type=["cdylib", "rlib"]
+# crate-type=["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 default   = []
@@ -23,9 +24,9 @@ calibrate = [
 [dependencies]
 # Core
 thiserror = "2.0.18"
-memmap2   = "0.9"
-regex     = "1"
-rayon     = "1.10"
+memmap2   = "0.9.10"
+regex     = "1.12.3"
+rayon     = "1.12.0"
 
 # Output (used until we write our own faster serializer)
 serde      = { version = "1", features = ["derive"] }

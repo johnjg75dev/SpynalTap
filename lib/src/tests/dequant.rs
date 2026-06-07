@@ -1,5 +1,5 @@
-use spynaltap::formats::gguf::dequant;
-use spynaltap::formats::gguf::types::GgmlType;
+use crate::formats::gguf::dequant;
+use crate::formats::gguf::types::GgmlType;
 
 #[test]
 fn dequant_f16_roundtrip() {

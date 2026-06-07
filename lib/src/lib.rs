@@ -27,7 +27,11 @@ pub mod merge;
 pub mod model;
 pub mod prune;
 pub mod quantize;
+pub mod report;
 pub mod svd;
+
+#[cfg(test)]
+mod tests;
 
 pub use analysis::{
     tensor_spectrum, Analysis, Analyzer, BlockAnalysis, Chart, ChartSeries, PerChannelStats,
@@ -43,6 +47,7 @@ pub use merge::{
 pub use model::{BlockRef, MetadataValue, Model, ModelFormat, Tensor, TensorDtype};
 pub use prune::{build_plan, parse_selection, PrunePlan, PruneReport, Selection};
 pub use quantize::{is_quantizable, quantize};
+pub use report::render_html_report;
 pub use svd::{
     apply_to_gguf as svd_apply_to_gguf, apply_to_safetensors as svd_apply_to_safetensors,
     build_plan as build_svd_plan, LayerSelection, OutputDtype, RankClamps, RankSpec,

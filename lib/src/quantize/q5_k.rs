@@ -3,21 +3,20 @@
 //! On-disk: 2 bytes f16 d, 2 bytes f16 dmin, 12 bytes scales, 32 bytes qh,
 //! 128 bytes qs. Total 176 B / 256 el. Dequant: x = d * sc1 * q - dmin * mn1.
 //!
-//! ## Scale table layout (12 bytes, canonical llama.cpp Q5_K)
+//! ## Scale table layout (12 bytes, canonical Q4_K / Q5_K)
 //!
-//! For sub-block j:
-//!   - sc_l = scales[j] & 0x3F          (low 6 bits of byte j)
-//!   - mn_l = scales[4 + j] & 0x3F      (low 6 bits of byte 4+j)
-//!   - sc_h = (scales[8 + (j >> 2)] >> ((j & 3) * 2)) & 3
-//!   - mn_h = (scales[9 + (j >> 2)] >> ((j & 3) * 2)) & 3
-//! So scales[8] holds 2-bit high parts of sc[0..3] packed, scales[9] holds
-//! 2-bit high parts of sc[4..7] AND mn[0..3] (sharing the byte — the
-//! encoder must satisfy the coupling: sc_h[4..7] == mn_h[0..3]).
-//! scales[10] holds mn_h[0..3] for j=0..3, and scales[11] holds mn_h[4..7].
+//! For sub-block j < 4:
+//!   - sc = scales[j] & 0x3F            (low 6 bits of byte j)
+//!   - mn = scales[4 + j] & 0x3F        (low 6 bits of byte 4+j)
 //!
-//! Our simple per-sub-block quantizer keeps all 6-bit values in [0, 63]
-//! (no overflow into the high 2 bits), so the coupling is trivially
-//! satisfied with 0.
+//! For sub-block j >= 4 (let s = j - 4):
+//!   - sc = (scales[8 + s] & 0x0F) | ((scales[s] >> 6) << 4)
+//!   - mn = (scales[8 + s] & 0x0F) | ((scales[4 + s] >> 6) << 4)
+//!
+//! The "shared low-4" trick: sc[4+s] and mn[4+s] share the same low
+//! nibble from scales[8 + s], while their high 2 bits come from
+//! scales[s] and scales[4 + s] respectively. The encoder must satisfy
+//! sc[4+s] & 0x0F == mn[4+s] & 0x0F.
 //!
 //! ## qs + qh layout
 //!
@@ -85,16 +84,56 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
             mn[s] = (-smin * inv_dmin).round().clamp(0.0, 63.0) as u8;
         }
 
-        // Pack 12-byte scale table. Our values fit in 6 bits (high 2 == 0),
-        // so the coupling constraint (sc_h[4..7] == mn_h[0..3]) is satisfied
-        // trivially: scales[9] low 2 bits = 0 = sc_h[4..7], and
-        // scales[9] bits 2-3 = 0 = mn_h[0..3], etc.
-        let mut packed = [0u8; 12];
-        for s in 0..N_SUB {
-            packed[s] = sc[s];
-            packed[4 + s] = mn[s];
+        // Enforce coupling: sc[4+s] and mn[4+s] share low nibble.
+        // Search all (lo, sc_h, mn_h) combos to minimize reconstruction error.
+        for s in 4..N_SUB {
+            if sc[s] == 0 && mn[s] == 0 {
+                continue;
+            }
+            let sub = &blk[s * SUB..(s + 1) * SUB];
+            let mut best_lo: u8 = 1;
+            let mut best_sc_h: u8 = 0;
+            let mut best_mn_h: u8 = 0;
+            let mut best_err = f32::INFINITY;
+            for lo in 1u8..=15u8 {
+                for sc_h in 0u8..=3u8 {
+                    for mn_h in 0u8..=3u8 {
+                        let sc_val = lo | (sc_h << 4);
+                        let mn_val = lo | (mn_h << 4);
+                        let d_sc = d * sc_val as f32;
+                        let m_sc = dmin * mn_val as f32;
+                        let mut err_max = 0.0f32;
+                        for &v in sub {
+                            if d_sc == 0.0 {
+                                continue;
+                            }
+                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 31.0) as f32;
+                            let recon = d_sc * q - m_sc;
+                            let e = (v - recon).abs();
+                            if e > err_max {
+                                err_max = e;
+                            }
+                        }
+                        if err_max < best_err {
+                            best_err = err_max;
+                            best_lo = lo;
+                            best_sc_h = sc_h;
+                            best_mn_h = mn_h;
+                        }
+                    }
+                }
+            }
+            sc[s] = best_lo | (best_sc_h << 4);
+            mn[s] = best_lo | (best_mn_h << 4);
         }
-        // The high-2-byte slots (scales[8..12]) stay zero.
+
+        // Pack 12-byte scale table (canonical Q4_K / Q5_K format).
+        let mut packed = [0u8; 12];
+        for s in 0..4 {
+            packed[s] = sc[s] | (((sc[4 + s] >> 4) & 0x03) << 6);
+            packed[4 + s] = mn[s] | (((mn[4 + s] >> 4) & 0x03) << 6);
+            packed[8 + s] = sc[4 + s] & 0x0F;
+        }
 
         // Quantize qs + qh.
         let mut qs = [0u8; 128];

@@ -1,200 +1,195 @@
-//! `spynaltape` — analyze and prune an AI model file (GGUF or safetensors).
+//! `spynaltape` — analyze, prune, SVD-compress, merge, and quantize AI model files.
 //!
-//! Default: open, analyze, print a recommendation, exit.
-//! With `--prune` and `--out`: analyze, prompt to confirm, then prune + write.
-//! With `--svd` and `--out`: SVD-compress the requested layers/tensors, then write.
+//! Subcommands:
+//! - `analyze` — run heuristic analysis, print recommendation
+//! - `prune` — remove specified blocks/layers
+//! - `svd` — SVD-compress specified tensors
+//! - `quant` — quantize model to specified GGML type
+//! - `merge` — merge two models (average, slerp, moe)
+//! - `bench` — benchmark operations
+//! - `test` — run self-tests
 
-use clap::{Args, Parser};
-use spynaltap::analysis::score::BlockRole;
+use clap::{Parser, Subcommand};
 use spynaltap::formats::gguf::GgufFile;
 use spynaltap::formats::gguf::types::GgmlType;
 use spynaltap::formats::safetensors::SafetensorsFile;
 use spynaltap::model::ModelFormat;
 use spynaltap::prune::{
-    Selection, apply_to_gguf, apply_to_safetensors, build_plan, parse_selection,
+    apply_to_gguf, apply_to_safetensors, build_plan, parse_selection,
 };
 use spynaltap::quantize::apply::quantize_gguf as quantize_gguf_apply;
 use spynaltap::svd::{
-    LayerSelection, OutputDtype, RankSpec, RankSpecWithClamps, SvdConfig, TensorSelection,
+    AdjacentSelection, LayerSelection, OutputDtype, RankSpecWithClamps, SvdConfig, TensorSelection,
     apply_to_gguf as svd_apply_gguf, apply_to_safetensors as svd_apply_st,
     build_plan as build_svd_plan,
 };
 use spynaltap::{Analyzer, Error};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "spynaltape",
     version,
-    about = "Analyze, prune, SVD-compress, merge, and quantize AI model files",
-    long_about = "spynaltape — these go to eleven.\n\n\
-                  Default: open, analyze, print a recommendation, exit.\n\
-                  Pass --prune, --svd, --quantize, or --merge to apply a transformation."
+    about = "spynaltape — these go to eleven.",
+    long_about = "Analyze, prune, SVD-compress, merge, and quantize AI model files.\n\n\
+                  Run `spynaltape <command> --help` for command-specific options."
 )]
 struct Cli {
-    /// Path to the model file (GGUF or safetensors).
-    model: PathBuf,
-
-    #[command(flatten)]
-    analysis: AnalysisArgs,
-
-    #[command(flatten)]
-    pruning: PruningArgs,
-
-    #[command(flatten)]
-    svd: SvdArgs,
-
-    #[command(flatten)]
-    merging: MergingArgs,
-
-    #[command(flatten)]
-    quantize: QuantizeArgs,
-
-    #[command(flatten)]
-    io: IoArgs,
+    #[command(subcommand)]
+    command: Commands,
 }
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "Analysis")]
-struct AnalysisArgs {
-    /// List every tensor in the model.
-    #[arg(long)]
-    list: bool,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Analyze a model and print recommendations
+    Analyze {
+        /// Path to the model file
+        model: PathBuf,
 
-    /// Number of elements to sample per tensor (default 200_000).
-    #[arg(long, default_value_t = 200_000)]
-    sample: usize,
+        /// Number of elements to sample per tensor
+        #[arg(long, default_value_t = 200_000)]
+        sample: usize,
 
-    /// Run a heuristic analysis and print a recommendation (default behavior).
-    #[arg(long)]
-    analyze: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
 
-    /// Output the report as JSON.
-    #[arg(long)]
-    json: bool,
+        /// Write HTML report to this path
+        #[arg(long, value_name = "PATH")]
+        report: Option<PathBuf>,
 
-    /// Write an HTML report (with embedded SVG charts) to this path.
-    #[arg(long, value_name = "PATH")]
-    report_html: Option<PathBuf>,
-}
+        /// Path to HTML template file (optional, uses built-in if not provided)
+        #[arg(long, value_name = "PATH")]
+        template: Option<PathBuf>,
+    },
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "Pruning")]
-struct PruningArgs {
-    /// Prune per SELECTION (see grammar in the docs).
-    #[arg(long)]
-    prune: Option<String>,
+    /// Prune specified blocks/layers from a model
+    Prune {
+        /// Path to the model file
+        model: PathBuf,
 
-    /// Re-open the pruned file and verify its structural integrity.
-    #[arg(long)]
-    verify: bool,
-}
+        /// Selection grammar (e.g., "auto:5", "keep:0,1,2", "drop:7,8", "pattern:.*ffn.*")
+        #[arg(long)]
+        selection: String,
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "SVD")]
-struct SvdArgs {
-    /// SVD-compress the model. Value is the layer-selection grammar:
-    ///   all | all-attn | all-ffn | all-mlp | 0,1,2 | 0-5,10 | regex:^blk\.0\.
-    /// Requires --out.
-    #[arg(long)]
-    svd: Option<String>,
+        /// Output path
+        #[arg(long, short = 'o')]
+        out: PathBuf,
 
-    /// Which tensor families to compress within each selected layer:
-    ///   attn | ffn | mlp | all | attn_q,ffn_up | regex:...
-    /// (default: mlp)
-    #[arg(long, default_value = "mlp")]
-    svd_tensors: String,
+        /// Verify output after writing
+        #[arg(long)]
+        verify: bool,
 
-    /// Rank spec for the low-rank factorization:
-    ///   64 | 0.5 | energy:0.99 | abs:64,min:8,max:256 | frac:0.5,min:4
-    /// (default: 0.5,min:4)
-    #[arg(long, default_value = "0.5,min:4")]
-    svd_rank: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
-    /// Output dtype for the packed (A, B) factors: f32 | f16 | bf16
-    ///   (use 'auto' to quantize output to Q8_0 when source is quantized, else F16)
-    /// (default: f16)
-    #[arg(long, default_value = "f16")]
-    svd_dtype: String,
+    /// SVD-compress specified tensors
+    Svd {
+        /// Path to the model file
+        model: PathBuf,
 
-    /// Minimum min(m, n) of a tensor to be eligible (default: 16).
-    #[arg(long, default_value_t = 16)]
-    svd_min_dim: usize,
+        /// Layer selection (e.g., "all", "all-attn", "0-5,10", "regex:^blk\\.0\\.")
+        #[arg(long)]
+        layers: String,
 
-    /// Use randomized SVD for matrices with >= this many elements (0 = never).
-    /// (default: 262144 = 256K)
-    #[arg(long, default_value_t = 262_144)]
-    svd_randomized_min: usize,
+        /// Tensor selection within layers (e.g., "mlp", "attn", "all", "ffn_gate,ffn_up")
+        #[arg(long, default_value = "mlp")]
+        tensors: String,
 
-    /// Randomized SVD oversampling (extra test columns).
-    #[arg(long, default_value_t = 8)]
-    svd_oversample: usize,
+        /// Rank specification (e.g., "64", "0.5", "energy:0.99", "frac:0.5,min:4")
+        #[arg(long, default_value = "0.5,min:4")]
+        rank: String,
 
-    /// Randomized SVD power iterations.
-    #[arg(long, default_value_t = 2)]
-    svd_power_iters: usize,
+        /// Output dtype (f32, f16, bf16, auto)
+        #[arg(long, default_value = "f16")]
+        dtype: String,
 
-    /// Suffix appended to the original name to form the "A" (m x k) factor.
-    #[arg(long, default_value = ".svd_a")]
-    svd_suffix_a: String,
+        /// Minimum dimension to qualify for SVD
+        #[arg(long, default_value_t = 16)]
+        min_dim: usize,
 
-    /// Suffix appended to the original name to form the "B" (k x n) factor.
-    #[arg(long, default_value = ".svd_b")]
-    svd_suffix_b: String,
+        /// Adjacent tensor selection (e.g., "attn_v+1,ffn_up-2")
+        #[arg(long)]
+        adjacent: Option<String>,
 
-    /// Adjacent tensors to also SVD-compress. Comma-separated role+offset selectors.
-    /// Example: 'attn_v+1,ffn_up-2'
-    #[arg(long)]
-    svd_adjacent: Option<String>,
-}
+        /// Output path
+        #[arg(long, short = 'o')]
+        out: PathBuf,
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "Merging")]
-struct MergingArgs {
-    /// Merge two model files into one (requires --model-b).
-    ///   average | slerp:<t> | moe:<strategy>:<k>
-    #[arg(long, value_name = "MODE")]
-    merge: Option<String>,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
-    /// Second model file for --merge.
-    #[arg(long, value_name = "PATH")]
-    model_b: Option<PathBuf>,
+    /// Quantize model to a GGML type
+    Quant {
+        /// Path to the model file (GGUF only for now)
+        model: PathBuf,
 
-    /// Interpolation weight t for --merge slerp:t (0 = full A, 1 = full B).
-    #[arg(long, default_value_t = 0.5, value_name = "FLOAT")]
-    slerp_t: f32,
+        /// Target quantization type
+        #[arg(long)]
+        target: String,
 
-    /// MoE merge strategy: 'average' | 'similarity' (requires --merge moe:...)
-    #[arg(long, default_value = "average", value_name = "STRAT")]
-    moe_strategy: String,
+        /// Output path
+        #[arg(long, short = 'o')]
+        out: PathBuf,
 
-    /// MoE top-k experts to keep when strategy=similarity.
-    #[arg(long, default_value_t = 2, value_name = "N")]
-    moe_top_k: usize,
-}
+        /// Quantize only specified blocks/layers (comma-separated indices or "all")
+        #[arg(long, default_value = "all")]
+        blocks: String,
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "Quantize")]
-struct QuantizeArgs {
-    /// Quantize every tensor in the model to this GGML block type:
-    ///   q2_k | q3_k | q4_0 | q4_1 | q4_k | q5_0 | q5_1 | q5_k | q6_k | q8_0 | q8_1 | q8_k
-    /// (GGUF only in the first cut.) Requires --out.
-    #[arg(long)]
-    quantize: Option<String>,
-}
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
-#[derive(Args, Debug, Default)]
-#[command(next_help_heading = "I/O")]
-struct IoArgs {
-    /// Output file path (required for --prune / --svd / --quantize / --merge).
-    #[arg(long)]
-    out: Option<PathBuf>,
+    /// Merge two models
+    Merge {
+        /// Path to model A
+        model_a: PathBuf,
 
-    /// Skip the y/N confirmation prompt.
-    #[arg(long, short = 'y')]
-    yes: bool,
+        /// Path to model B
+        #[arg(long)]
+        model_b: PathBuf,
+
+        /// Merge mode: "average", "slerp:<t>", "moe:<strategy>:<k>"
+        #[arg(long)]
+        mode: String,
+
+        /// Output path
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Benchmark operations
+    Bench {
+        /// Operation to benchmark (analyze, svd, quant)
+        #[arg(default_value = "analyze")]
+        op: String,
+
+        /// Model path
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Iterations
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+    },
+
+    /// Run self-tests
+    Test {
+        /// Test category (all, dequant, svd, quant)
+        #[arg(default_value = "all")]
+        category: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -209,229 +204,233 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
-    let format = ModelFormat::from_path(&cli.model);
-    eprintln!(
-        "[open] {} (format: {})",
-        cli.model.display(),
-        format.as_str()
-    );
+    match cli.command {
+        Commands::Analyze { model, sample, json, report, template } => {
+            run_analyze(&model, sample, json, report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v))
+        }
+        Commands::Prune { model, selection, out, verify, yes } => {
+            run_prune(&model, &selection, &out, verify, yes)
+        }
+        Commands::Svd { model, layers, tensors, rank, dtype, min_dim, adjacent, out, yes } => {
+            run_svd(&model, &layers, &tensors, &rank, &dtype, min_dim, adjacent.as_deref(), &out, yes)
+        }
+        Commands::Quant { model, target, out, blocks, yes } => {
+            run_quant(&model, &target, &out, &blocks, yes)
+        }
+        Commands::Merge { model_a, model_b, mode, out, yes } => {
+            run_merge(&model_a, &model_b, &mode, &out, yes)
+        }
+        Commands::Bench { op, model, iterations } => {
+            run_bench(&op, model.as_ref().map(|v| &**v), iterations)
+        }
+        Commands::Test { category } => {
+            run_test(&category)
+        }
+    }
+}
+
+fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Path>, template_path: Option<&Path>) -> Result<(), Error> {
+    let format = ModelFormat::from_path(model);
+    eprintln!("[open] {} (format: {})", model.display(), format.as_str());
 
     match format {
-        ModelFormat::Gguf => run_gguf(cli),
-        ModelFormat::Safetensors => run_safetensors(cli),
-    }
-}
-
-fn run_gguf(cli: Cli) -> Result<(), Error> {
-    let gg = GgufFile::open(&cli.model)?;
-
-    if cli.analysis.list {
-        print_tensor_list(&gg, cli.analysis.json);
-        return Ok(());
-    }
-
-    if cli.analysis.sample == 0 {
-        return Err(Error::Gguf("--sample must be > 0".into()));
-    }
-
-    let analysis = Analyzer::with_sample_per_tensor(cli.analysis.sample).analyze(&gg)?;
-    print_human_report(&gg, &analysis, cli.analysis.json);
-
-    if let Some(sel_str) = &cli.pruning.prune {
-        let selection = parse_selection(sel_str)?;
-        let out_path = cli
-            .io
-            .out
-            .as_ref()
-            .ok_or_else(|| Error::Gguf("--prune requires --out".into()))?
-            .clone();
-        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.io.yes)?;
-        let plan = build_plan(&gg, &selection, Some(&analysis.blocks))?;
-        print_plan_summary(&plan);
-        let report = apply_to_gguf(&gg, &plan, &out_path)?;
-        println!("\n=== prune report ===");
-        if cli.analysis.json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
-        } else {
-            print_prune_report(&report);
-        }
-        if cli.pruning.verify {
-            use spynaltap::formats::gguf::verify;
-            let kept: Vec<String> = plan
-                .keep
-                .iter()
-                .filter(|(_, k)| *k)
-                .map(|(n, _)| n.clone())
-                .collect();
-            let r = verify::verify(&out_path, &kept)?;
-            println!("\n=== verify ===");
-            if r.ok {
-                println!("  PASS");
+        ModelFormat::Gguf => {
+            let gg = GgufFile::open(model)?;
+            let analysis = Analyzer::with_sample_per_tensor(sample).analyze(&gg)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&analysis)?);
             } else {
-                println!("  FAIL");
+                print_human_report(&gg, &analysis);
             }
-            println!("  tensors: {}", r.kept_tensors);
-            println!(
-                "  bytes:   {} ({:.2} MB)",
-                r.total_bytes,
-                r.total_bytes as f64 / 1_048_576.0
-            );
-            for e in &r.errors {
-                println!("  ERROR: {e}");
-            }
-            for w in &r.warnings {
-                println!("  warn:  {w}");
+            if let Some(path) = report_path {
+                write_html_report(&analysis, path, template_path)?;
+                eprintln!("[report] wrote {}", path.display());
             }
         }
-    }
-
-    if let Some(layer_sel) = &cli.svd.svd {
-        let out_path = cli
-            .io
-            .out
-            .as_ref()
-            .ok_or_else(|| Error::Gguf("--svd requires --out".into()))?
-            .clone();
-        let cfg = build_svd_config(&cli, layer_sel)?;
-        print_svd_config_summary(&cfg);
-        let plan = build_svd_plan(&gg, &cfg)?;
-        print_svd_plan_summary(&plan);
-        confirm_or_exit_svd(&out_path, &plan, cli.io.yes)?;
-        let report = svd_apply_gguf(&gg, &plan, &out_path)?;
-        println!("\n=== SVD report ===");
-        if cli.analysis.json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
-        } else {
-            print_svd_report(&report);
-        }
-    }
-
-    if let Some(q_str) = &cli.quantize.quantize {
-        let out_path = cli
-            .io
-            .out
-            .as_ref()
-            .ok_or_else(|| Error::Gguf("--quantize requires --out".into()))?
-            .clone();
-        let target = parse_quant_type(q_str)?;
-        confirm_or_exit_quantize(&cli.model, target, &out_path, cli.io.yes)?;
-        let report = quantize_gguf_apply(&cli.model, target, &out_path)?;
-        println!("\n=== quantize report ===");
-        if cli.analysis.json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
-        } else {
-            print_quantize_report(&report);
+        ModelFormat::Safetensors => {
+            let st = SafetensorsFile::open(model)?;
+            let analysis = Analyzer::with_sample_per_tensor(sample).analyze(&st)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&analysis)?);
+            } else {
+                print_human_report(&st, &analysis);
+            }
+            if let Some(path) = report_path {
+                write_html_report(&analysis, path, template_path)?;
+                eprintln!("[report] wrote {}", path.display());
+            }
         }
     }
     Ok(())
 }
 
-fn run_safetensors(cli: Cli) -> Result<(), Error> {
-    let st = SafetensorsFile::open(&cli.model)?;
+fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: bool, yes: bool) -> Result<(), Error> {
+    let format = ModelFormat::from_path(model);
+    eprintln!("[open] {} (format: {})", model.display(), format.as_str());
 
-    if cli.analysis.list {
-        print_tensor_list(&st, cli.analysis.json);
-        return Ok(());
-    }
-
-    if cli.analysis.sample == 0 {
-        return Err(Error::Safetensors("--sample must be > 0".into()));
-    }
-
-    let analysis = Analyzer::with_sample_per_tensor(cli.analysis.sample).analyze(&st)?;
-    print_human_report(&st, &analysis, cli.analysis.json);
-
-    if let Some(sel_str) = &cli.pruning.prune {
-        let selection = parse_selection(sel_str)?;
-        let out_path = cli
-            .io
-            .out
-            .as_ref()
-            .ok_or_else(|| Error::Safetensors("--prune requires --out".into()))?
-            .clone();
-        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.io.yes)?;
-        let plan = build_plan(&st, &selection, Some(&analysis.blocks))?;
-        print_plan_summary(&plan);
-        let report = apply_to_safetensors(&st, &plan, &out_path)?;
-        println!("\n=== prune report ===");
-        if cli.analysis.json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
-        } else {
+    let selection = parse_selection(selection_str)?;
+    
+    match format {
+        ModelFormat::Gguf => {
+            let gg = GgufFile::open(model)?;
+            let analysis = Analyzer::new().analyze(&gg)?;
+            let plan = build_plan(&gg, &selection, Some(&analysis.blocks))?;
+            confirm_or_exit(&format!("prune {:?}", plan.dropped_blocks), out, yes)?;
+            let report = apply_to_gguf(&gg, &plan, out)?;
+            print_prune_report(&report);
+            if verify {
+                verify_gguf(out, &plan)?;
+            }
+        }
+        ModelFormat::Safetensors => {
+            let st = SafetensorsFile::open(model)?;
+            let analysis = Analyzer::new().analyze(&st)?;
+            let plan = build_plan(&st, &selection, Some(&analysis.blocks))?;
+            confirm_or_exit(&format!("prune {:?}", plan.dropped_blocks), out, yes)?;
+            let report = apply_to_safetensors(&st, &plan, out)?;
             print_prune_report(&report);
         }
     }
+    Ok(())
+}
 
-    if let Some(layer_sel) = &cli.svd.svd {
-        let out_path = cli
-            .io
-            .out
-            .as_ref()
-            .ok_or_else(|| Error::Safetensors("--svd requires --out".into()))?
-            .clone();
-        let cfg = build_svd_config(&cli, layer_sel)?;
-        print_svd_config_summary(&cfg);
-        let plan = build_svd_plan(&st, &cfg)?;
-        print_svd_plan_summary(&plan);
-        confirm_or_exit_svd(&out_path, &plan, cli.io.yes)?;
-        let report = svd_apply_st(&st, &plan, &out_path)?;
-        println!("\n=== SVD report ===");
-        if cli.analysis.json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
-        } else {
+fn run_svd(
+    model: &Path, layers_str: &str, tensors_str: &str, rank_str: &str, dtype_str: &str,
+    min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool
+) -> Result<(), Error> {
+    let format = ModelFormat::from_path(model);
+    eprintln!("[open] {} (format: {})", model.display(), format.as_str());
+
+    let layers = LayerSelection::parse(layers_str)
+        .map_err(|e| Error::Gguf(format!("--layers: {e}")))?;
+    let tensors = TensorSelection::parse(tensors_str)
+        .map_err(|e| Error::Gguf(format!("--tensors: {e}")))?;
+    let rank = RankSpecWithClamps::parse(rank_str)
+        .map_err(|e| Error::Gguf(format!("--rank: {e}")))?;
+    let dtype = OutputDtype::parse(dtype_str)
+        .map_err(|e| Error::Gguf(format!("--dtype: {e}")))?;
+    
+    let adjacent = if let Some(s) = adjacent_str {
+        Some(AdjacentSelection::parse(s)
+            .map_err(|e| Error::Gguf(format!("--adjacent: {e}")))?)
+    } else {
+        None
+    };
+
+    let cfg = SvdConfig {
+        layers, tensors, rank, dtype, min_dim,
+        randomized: false, randomized_oversample: 8, randomized_power_iters: 2, randomized_min_elems: 262_144,
+        suffix_a: ".svd_a".into(), suffix_b: ".svd_b".into(),
+        per_layer: Default::default(), per_tensor: Vec::new(), adjacent: adjacent.flatten(),
+    };
+
+    match format {
+        ModelFormat::Gguf => {
+            let gg = GgufFile::open(model)?;
+            let plan = build_svd_plan(&gg, &cfg)?;
+            print_svd_plan_summary(&plan);
+            confirm_or_exit(&format!("SVD compress {} targets", plan.targets.len()), out, yes)?;
+            let report = svd_apply_gguf(&gg, &plan, out)?;
+            print_svd_report(&report);
+        }
+        ModelFormat::Safetensors => {
+            let st = SafetensorsFile::open(model)?;
+            let plan = build_svd_plan(&st, &cfg)?;
+            print_svd_plan_summary(&plan);
+            confirm_or_exit(&format!("SVD compress {} targets", plan.targets.len()), out, yes)?;
+            let report = svd_apply_st(&st, &plan, out)?;
             print_svd_report(&report);
         }
     }
     Ok(())
 }
 
-// ---- SVD helpers --------------------------------------------------------
-
-fn build_svd_config(cli: &Cli, layer_sel: &str) -> Result<SvdConfig, Error> {
-    let layers =
-        LayerSelection::parse(layer_sel).map_err(|e| Error::Gguf(format!("--svd: {e}")))?;
-    let tensors = TensorSelection::parse(&cli.svd.svd_tensors)
-        .map_err(|e| Error::Gguf(format!("--svd-tensors: {e}")))?;
-    let rank = RankSpecWithClamps::parse(&cli.svd.svd_rank)
-        .map_err(|e| Error::Gguf(format!("--svd-rank: {e}")))?;
-    let dtype = OutputDtype::parse(&cli.svd.svd_dtype)
-        .map_err(|e| Error::Gguf(format!("--svd-dtype: {e}")))?;
-    Ok(SvdConfig {
-        layers,
-        tensors,
-        rank,
-        dtype,
-        min_dim: cli.svd.svd_min_dim,
-        randomized: cli.svd.svd_randomized_min > 0,
-        randomized_oversample: cli.svd.svd_oversample,
-        randomized_power_iters: cli.svd.svd_power_iters,
-        randomized_min_elems: cli.svd.svd_randomized_min,
-        suffix_a: cli.svd.svd_suffix_a.clone(),
-        suffix_b: cli.svd.svd_suffix_b.clone(),
-        per_layer: std::collections::BTreeMap::new(),
-        per_tensor: Vec::new(),
-        adjacent: None,
-    })
+fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: &str, yes: bool) -> Result<(), Error> {
+    let format = ModelFormat::from_path(model);
+    if format != ModelFormat::Gguf {
+        return Err(Error::Gguf("quantize currently only supports GGUF".into()));
+    }
+    
+    let target = parse_quant_type(target_str)?;
+    eprintln!("[quant] {} -> {} as {}", model.display(), out.display(), target.as_str());
+    
+    // TODO: implement block selection
+    let _blocks = blocks_str;
+    
+    confirm_or_exit(&format!("quantize to {}", target.as_str()), out, yes)?;
+    let report = quantize_gguf_apply(model, target, out)?;
+    print_quant_report(&report);
+    Ok(())
 }
 
-fn print_svd_config_summary(cfg: &SvdConfig) {
-    eprintln!("\n[SVD config]");
-    eprintln!("  layers:       {:?}", cfg.layers);
-    eprintln!("  tensors:      {:?}", cfg.tensors);
-    eprintln!("  rank spec:    {:?}", cfg.rank.spec);
-    eprintln!(
-        "  rank clamps:  min={} max={:?}",
-        cfg.rank.clamps.min, cfg.rank.clamps.max
-    );
-    eprintln!("  output dtype: {}", cfg.dtype.as_str());
-    eprintln!("  min_dim:      {}", cfg.min_dim);
-    eprintln!(
-        "  randomized:   {} (oversample={}, power_iters={}, min_elems={})",
-        cfg.randomized,
-        cfg.randomized_oversample,
-        cfg.randomized_power_iters,
-        cfg.randomized_min_elems
-    );
-    eprintln!("  suffixes:     a={:?} b={:?}", cfg.suffix_a, cfg.suffix_b);
+fn run_merge(model_a: &Path, model_b: &Path, mode: &str, out: &Path, yes: bool) -> Result<(), Error> {
+    // TODO: implement merge
+    eprintln!("[merge] {} + {} -> {} (mode: {})", model_a.display(), model_b.display(), out.display(), mode);
+    confirm_or_exit(&format!("merge ({})", mode), out, yes)?;
+    Err(Error::Gguf("merge not yet implemented".into()))
+}
+
+fn run_bench(op: &str, _model: Option<&Path>, _iterations: usize) -> Result<(), Error> {
+    eprintln!("[bench] op={} iterations={}", op, _iterations);
+    // TODO: implement benchmarking
+    Ok(())
+}
+
+fn run_test(_category: &str) -> Result<(), Error> {
+    eprintln!("[test] category={}", _category);
+    // TODO: implement self-tests
+    Ok(())
+}
+
+// ---- Helpers -------------------------------------------------------------
+
+fn confirm_or_exit(action: &str, out: &Path, yes: bool) -> Result<(), Error> {
+    eprintln!("[confirm] about to {} -> {}", action, out.display());
+    if yes {
+        eprintln!("           --yes set; proceeding.");
+        return Ok(());
+    }
+    eprint!("           continue? [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s).map_err(Error::Io)?;
+    let s = s.trim().to_ascii_lowercase();
+    if s == "y" || s == "yes" {
+        Ok(())
+    } else {
+        eprintln!("           cancelled.");
+        std::process::exit(0);
+    }
+}
+
+fn print_human_report<M: spynaltap::Model + ?Sized>(m: &M, a: &spynaltap::Analysis) {
+    let total_bytes: u64 = m.tensors().iter().map(|t| t.byte_size).sum();
+    println!("\n=== model summary ===");
+    if let Some(n) = m.name() { println!("  model.name:     {n}"); }
+    if let Some(a_) = m.architecture() { println!("  architecture:   {a_}"); }
+    if let Some(bc) = m.block_count() { println!("  block_count:    {bc}"); }
+    println!("  tensors:        {}", m.tensors().len());
+    println!("  total size:     {:.2} MB", total_bytes as f64 / 1_048_576.0);
+    println!("  sample/tensor:  {}", a.sample_per_tensor);
+
+    println!("\n=== block summary ===");
+    println!("{:<10}  {:<7}  {:>7}  {:>10}  {:>9}", "label", "role", "tensors", "bytes", "MB");
+    let mut sortable: Vec<_> = a.blocks.iter().collect();
+    sortable.sort_by_key(|b| (b.index, b.label.clone()));
+    for b in &sortable {
+        println!("{:<10}  {:<7}  {:>7}  {:>10}  {:>9.2}", b.label, b.role.as_str(), b.tensor_count, b.total_bytes, b.total_bytes as f64 / 1_048_576.0);
+    }
+
+    println!("\n=== recommended ===");
+    println!("  auto-prune {} blocks: {:?}", a.recommendation_count, a.recommendation);
+}
+
+fn print_prune_report(r: &spynaltap::PruneReport) {
+    println!("\n=== prune report ===");
+    println!("  bytes:   {} -> {} ({:.2} MB saved)", r.bytes_in, r.bytes_out, (r.bytes_in as f64 - r.bytes_out as f64) / 1_048_576.0);
+    println!("  tensors: kept={} dropped={}", r.tensors_kept, r.tensors_dropped);
+    println!("  blocks:  {} -> {}", r.original_block_count, r.new_block_count);
+    println!("  output:  {}", r.output_path);
 }
 
 fn print_svd_plan_summary(plan: &spynaltap::SvdPlan) {
@@ -439,306 +438,41 @@ fn print_svd_plan_summary(plan: &spynaltap::SvdPlan) {
     eprintln!("  blocks:           {}", plan.original_block_count);
     eprintln!("  targets:          {}", plan.targets.len());
     eprintln!("  skipped:          {}", plan.skipped.len());
-    eprintln!(
-        "  orig target bytes:{:.2} MB",
-        plan.orig_bytes() as f64 / 1_048_576.0
-    );
-    eprintln!(
-        "  est. new bytes:   {:.2} MB",
-        plan.new_bytes() as f64 / 1_048_576.0
-    );
-    eprintln!(
-        "  est. compression: {:.1}%",
-        plan.compression_ratio() * 100.0
-    );
-    for t in plan.targets.iter().take(20) {
-        eprintln!(
-            "    {:<48}  m={:<6}  n={:<6}  k={:<6}  ({} -> {} bytes)",
-            t.name, t.m, t.n, t.k, t.orig_bytes, t.new_bytes
-        );
-    }
-    if plan.targets.len() > 20 {
-        eprintln!("    ... and {} more", plan.targets.len() - 20);
-    }
-    for s in plan.skipped.iter().take(10) {
-        eprintln!("    [skip] {:<48}  {}", s.name, s.reason);
-    }
+    eprintln!("  orig:             {:.2} MB", plan.orig_bytes() as f64 / 1_048_576.0);
+    eprintln!("  est. new:         {:.2} MB", plan.new_bytes() as f64 / 1_048_576.0);
+    eprintln!("  est. compression: {:.1}%", plan.compression_ratio() * 100.0);
 }
 
 fn print_svd_report(r: &spynaltap::SvdReport) {
-    println!("  output:                {}", r.output_path);
-    println!(
-        "  file size:             {} -> {} bytes ({:.2} MB -> {:.2} MB)",
-        r.bytes_in,
-        r.bytes_out,
-        r.bytes_in as f64 / 1_048_576.0,
-        r.bytes_out as f64 / 1_048_576.0
-    );
-    println!("  targets applied:       {}", r.applied.len());
-    println!(
-        "  target bytes:          {} -> {} bytes (saved {:.2} MB)",
-        r.orig_tensor_bytes,
-        r.new_tensor_bytes,
-        (r.orig_tensor_bytes as f64 - r.new_tensor_bytes as f64) / 1_048_576.0
-    );
-    println!(
-        "  compression ratio:     {:.1}%",
-        r.compression_ratio * 100.0
-    );
-    println!("  skipped:               {}", r.skipped.len());
-    println!();
-    println!(
-        "  {:<48}  {:>4}  {:>4}  {:>4}  {:>10}  {:>10}  {:>10}  {:>9}",
-        "tensor", "m", "n", "k", "orig B", "new B", "saved B", "err"
-    );
-    for a in r.applied.iter().take(40) {
-        println!(
-            "  {:<48}  {:>4}  {:>4}  {:>4}  {:>10}  {:>10}  {:>10}  {:>9.4}",
-            truncate(&a.name, 48),
-            a.m,
-            a.n,
-            a.k,
-            a.orig_bytes,
-            a.new_bytes,
-            a.orig_bytes.saturating_sub(a.new_bytes),
-            a.approx_error
-        );
-    }
-    if r.applied.len() > 40 {
-        println!("  ... and {} more", r.applied.len() - 40);
-    }
+    println!("\n=== SVD report ===");
+    println!("  output:       {}", r.output_path);
+    println!("  file size:    {} -> {} bytes ({:.2} MB -> {:.2} MB)", r.bytes_in, r.bytes_out, r.bytes_in as f64 / 1_048_576.0, r.bytes_out as f64 / 1_048_576.0);
+    println!("  compression:  {:.1}%", r.compression_ratio * 100.0);
+    println!("  targets:      {}", r.applied.len());
+    println!("  skipped:      {}", r.skipped.len());
 }
 
-fn confirm_or_exit_svd(
-    out: &std::path::Path,
-    plan: &spynaltap::SvdPlan,
-    yes: bool,
-) -> Result<(), Error> {
-    eprintln!(
-        "\n[confirm] about to SVD-compress {} targets -> {}",
-        plan.targets.len(),
-        out.display()
-    );
-    eprintln!(
-        "           est. compression: {:.1}%",
-        plan.compression_ratio() * 100.0
-    );
-    if yes {
-        eprintln!("           --yes set; proceeding.");
-        return Ok(());
-    }
-    eprint!("           continue? [y/N] ");
-    std::io::stderr().flush().ok();
-    let mut s = String::new();
-    std::io::stdin().read_line(&mut s).map_err(Error::Io)?;
-    let s = s.trim().to_ascii_lowercase();
-    if s == "y" || s == "yes" {
-        Ok(())
-    } else {
-        eprintln!("           cancelled.");
-        std::process::exit(0);
-    }
+fn print_quant_report(r: &spynaltap::quantize::apply::QuantizeReport) {
+    println!("\n=== quantize report ===");
+    println!("  output:       {}", r.output_path);
+    println!("  target:       {}", r.target);
+    println!("  tensors:      {} total, {} quantized", r.tensors_total, r.tensors_quantized);
+    println!("  bytes:        {} -> {} ({:.2} MB -> {:.2} MB)", r.bytes_in, r.bytes_out, r.bytes_in as f64 / 1_048_576.0, r.bytes_out as f64 / 1_048_576.0);
+    println!("  compression:  {:.1}%", r.compression_ratio * 100.0);
 }
 
-fn confirm_or_exit_prune(
-    out: &std::path::Path,
-    sel: &Selection,
-    recommendation: &[i32],
-    yes: bool,
-) -> Result<(), Error> {
-    let sel_desc = match sel {
-        Selection::All => "all (no-op)".to_string(),
-        Selection::Keep(ks) => format!("keep {:?}", ks),
-        Selection::Drop(ds) => format!("drop {:?}", ds),
-        Selection::Auto(n) => format!("auto (drop {n} blocks)"),
-        Selection::Pattern(p) => format!("pattern /{p}/", p = p.as_str()),
-    };
-    eprintln!(
-        "\n[confirm] about to prune with {sel_desc} -> {}",
-        out.display()
-    );
-    if !recommendation.is_empty() {
-        eprintln!("           recommendation: drop {:?}", recommendation);
-    }
-    if yes {
-        eprintln!("           --yes set; proceeding.");
-        return Ok(());
-    }
-    eprint!("           continue? [y/N] ");
-    std::io::stderr().flush().ok();
-    let mut s = String::new();
-    std::io::stdin().read_line(&mut s).map_err(Error::Io)?;
-    let s = s.trim().to_ascii_lowercase();
-    if s == "y" || s == "yes" {
-        Ok(())
-    } else {
-        eprintln!("           cancelled.");
-        std::process::exit(0);
-    }
+fn verify_gguf(path: &Path, plan: &spynaltap::PrunePlan) -> Result<(), Error> {
+    use spynaltap::formats::gguf::verify;
+    let kept: Vec<String> = plan.keep.iter().filter(|(_, k)| *k).map(|(n, _)| n.clone()).collect();
+    let r = verify::verify(path, &kept)?;
+    println!("\n=== verify ===");
+    if r.ok { println!("  PASS"); } else { println!("  FAIL"); }
+    println!("  tensors: {}", r.kept_tensors);
+    println!("  bytes:   {} ({:.2} MB)", r.total_bytes, r.total_bytes as f64 / 1_048_576.0);
+    for e in &r.errors { println!("  ERROR: {e}"); }
+    for w in &r.warnings { println!("  warn:  {w}"); }
+    Ok(())
 }
-
-fn print_tensor_list<M: spynaltap::Model + ?Sized>(m: &M, json: bool) {
-    if json {
-        let list: Vec<_> = m
-            .tensors()
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "dtype": t.dtype.as_str(),
-                    "shape": t.shape,
-                    "bytes": t.byte_size,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&list).unwrap());
-    } else {
-        println!(
-            "{:<60}  {:<8}  {:>14}  {:>10}",
-            "name", "dtype", "elements", "MB"
-        );
-        println!("{}", "-".repeat(110));
-        let mut total_bytes = 0u64;
-        for t in m.tensors() {
-            let elems: u64 = t.shape.iter().product();
-            println!(
-                "{:<60}  {:<8}  {:>14}  {:>10.2}",
-                truncate(&t.name, 60),
-                t.dtype.as_str(),
-                elems,
-                t.byte_size as f64 / 1_048_576.0
-            );
-            total_bytes += t.byte_size;
-        }
-        println!(
-            "\n{} tensors, {:.2} MB total",
-            m.tensors().len(),
-            total_bytes as f64 / 1_048_576.0
-        );
-    }
-}
-
-fn print_human_report<M: spynaltap::Model + ?Sized>(m: &M, a: &spynaltap::Analysis, json: bool) {
-    if json {
-        let v = serde_json::to_string_pretty(a).unwrap();
-        println!("{v}");
-        return;
-    }
-    let total_bytes: u64 = m.tensors().iter().map(|t| t.byte_size).sum();
-    println!("\n=== model summary ===");
-    if let Some(n) = m.name() {
-        println!("  model.name:     {n}");
-    }
-    if let Some(a_) = m.architecture() {
-        println!("  architecture:   {a_}");
-    }
-    if let Some(bc) = m.block_count() {
-        println!("  block_count:    {bc}");
-    }
-    println!("  tensors:        {}", m.tensors().len());
-    println!(
-        "  total size:     {:.2} MB",
-        total_bytes as f64 / 1_048_576.0
-    );
-    println!("  sample/tensor:  {}", a.sample_per_tensor);
-
-    println!("\n=== block summary ===");
-    let mut sortable: Vec<_> = a.blocks.iter().collect();
-    sortable.sort_by_key(|b| (b.index, b.label.clone()));
-    println!(
-        "{:<10}  {:<7}  {:>7}  {:>10}  {:>9}  {:>9}",
-        "label", "role", "tensors", "bytes", "MB", "removable"
-    );
-    for b in &sortable {
-        println!(
-            "{:<10}  {:<7}  {:>7}  {:>10}  {:>9.2}  {:>9.3}",
-            b.label,
-            b.role.as_str(),
-            b.tensor_count,
-            b.total_bytes,
-            b.total_bytes as f64 / 1_048_576.0,
-            b.removable
-        );
-    }
-
-    println!("\n=== top blocks by removable score (higher = safer to prune) ===");
-    let mut ranked: Vec<_> = a
-        .blocks
-        .iter()
-        .filter(|b| b.role == BlockRole::Block)
-        .collect();
-    ranked.sort_by(|x, y| {
-        y.removable
-            .partial_cmp(&x.removable)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for b in ranked.iter().take(10) {
-        println!(
-            "  {:<8}  removable={:.3}  size={:.2} MB",
-            b.label,
-            b.removable,
-            b.total_bytes as f64 / 1_048_576.0
-        );
-    }
-
-    println!("\n=== recommended ===");
-    println!("  auto-prune {} blocks:", a.recommendation_count);
-    println!("  {:?}", a.recommendation);
-    println!(
-        "  estimated bytes after: {:.2} MB",
-        a.estimated_bytes_after_prune as f64 / 1_048_576.0
-    );
-    if let Some(_first) = a.recommendation.first() {
-        let n = a.recommendation_count;
-        println!(
-            "  command:  spynaltape {} --prune auto:{n} --out pruned.gguf",
-            m.name().unwrap_or("model")
-        );
-    }
-}
-
-fn print_plan_summary(plan: &spynaltap::PrunePlan) {
-    eprintln!("\n[prune plan]");
-    eprintln!("  blocks original: {}", plan.original_block_count);
-    eprintln!("  blocks dropped:  {:?}", plan.dropped_blocks);
-    eprintln!("  blocks new:      {}", plan.new_block_count);
-    let kept: usize = plan.keep.iter().filter(|(_, k)| *k).count();
-    let dropped: usize = plan.keep.iter().filter(|(_, k)| !*k).count();
-    eprintln!("  tensors kept:    {kept}");
-    eprintln!("  tensors dropped: {dropped}");
-}
-
-fn print_prune_report(r: &spynaltap::PruneReport) {
-    println!(
-        "  bytes:   {} -> {} ({:.2} MB saved)",
-        r.bytes_in,
-        r.bytes_out,
-        (r.bytes_in as f64 - r.bytes_out as f64) / 1_048_576.0
-    );
-    println!(
-        "  tensors: kept={} dropped={}",
-        r.tensors_kept, r.tensors_dropped
-    );
-    println!(
-        "  blocks:  {} -> {}",
-        r.original_block_count, r.new_block_count
-    );
-    println!("  output:  {}", r.output_path);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
-}
-
-// silence "unused" on RankSpec
-#[allow(dead_code)]
-fn _rsv_keepalive(_: RankSpec) {}
-
-// ---- Quantize helpers ----------------------------------------------------
 
 fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
     match s.to_ascii_lowercase().as_str() {
@@ -755,77 +489,19 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
         "q8_1" => Ok(GgmlType::Q8_1),
         "q8_k" => Ok(GgmlType::Q8K),
         other => Err(Error::Gguf(format!(
-            "--quantize: unsupported type {other:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k)"
+            "unsupported quant type {:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k)", other
         ))),
     }
 }
 
-fn confirm_or_exit_quantize(
-    src: &std::path::Path,
-    target: GgmlType,
-    out: &std::path::Path,
-    yes: bool,
-) -> Result<(), Error> {
-    eprintln!(
-        "\n[confirm] about to quantize {} -> {} as {}",
-        src.display(),
-        out.display(),
-        target.as_str()
+fn write_html_report(analysis: &spynaltap::Analysis, path: &Path, _template_path: Option<&Path>) -> Result<(), Error> {
+    // TODO: load template, fill in data from analysis, write HTML
+    // For now, write a minimal placeholder
+    let html = format!(
+        r#"<!DOCTYPE html><html><head><title>SpynalTap Report</title></head><body><h1>Analysis Report</h1><p>Blocks: {}</p><p>Recommendation: {:?}</p></body></html>"#,
+        analysis.blocks.len(),
+        analysis.recommendation
     );
-    if yes {
-        eprintln!("           --yes set; proceeding.");
-        return Ok(());
-    }
-    eprint!("           continue? [y/N] ");
-    std::io::stderr().flush().ok();
-    let mut s = String::new();
-    std::io::stdin().read_line(&mut s).map_err(Error::Io)?;
-    let s = s.trim().to_ascii_lowercase();
-    if s == "y" || s == "yes" {
-        Ok(())
-    } else {
-        eprintln!("           cancelled.");
-        std::process::exit(0);
-    }
-}
-
-fn print_quantize_report(r: &spynaltap::quantize::apply::QuantizeReport) {
-    println!("  input:           {}", r.input_path);
-    println!("  output:          {}", r.output_path);
-    println!("  target:          {}", r.target);
-    println!(
-        "  tensors:         {} total, {} quantized, {} passthrough, {} skipped",
-        r.tensors_total,
-        r.tensors_quantized,
-        r.tensors_passthrough,
-        r.tensors_skipped.len()
-    );
-    println!(
-        "  bytes:           {} -> {} ({:.2} MB -> {:.2} MB)",
-        r.bytes_in,
-        r.bytes_out,
-        r.bytes_in as f64 / 1_048_576.0,
-        r.bytes_out as f64 / 1_048_576.0
-    );
-    println!("  compression:     {:.1}%", r.compression_ratio * 100.0);
-    println!();
-    println!(
-        "  {:<48}  {:<8}  {:<8}  {:>10}  {:>10}  {:>10}  {:>9}",
-        "tensor", "from", "to", "elems", "in B", "out B", "max err"
-    );
-    for t in r.per_tensor.iter().take(40) {
-        println!(
-            "  {:<48}  {:<8}  {:<8}  {:>10}  {:>10}  {:>10}  {:>9.4}",
-            truncate(&t.name, 48),
-            t.from,
-            t.to,
-            t.n_elements,
-            t.bytes_in,
-            t.bytes_out,
-            t.max_abs_err
-        );
-    }
-    if r.per_tensor.len() > 40 {
-        println!("  ... and {} more", r.per_tensor.len() - 40);
-    }
+    std::fs::write(path, html).map_err(Error::Io)?;
+    Ok(())
 }

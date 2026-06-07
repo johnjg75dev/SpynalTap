@@ -5,12 +5,12 @@
 //! within the expected tolerance for the type. We also assert the exact
 //! output byte count and a few hand-computed anchor points.
 
-use spynaltap::formats::gguf::dequant;
-use spynaltap::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
-use spynaltap::formats::gguf::writer::GgufWriter;
-use spynaltap::formats::gguf::GgufFile;
-use spynaltap::quantize::apply::quantize_gguf;
-use spynaltap::quantize::{q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
+use crate::formats::gguf::dequant;
+use crate::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
+use crate::formats::gguf::writer::GgufWriter;
+use crate::formats::gguf::GgufFile;
+use crate::quantize::apply::quantize_gguf;
+use crate::quantize::{q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
 
 const BLOCK: usize = 32;
 
@@ -567,7 +567,7 @@ fn run_e2e(target: GgmlType) {
         assert_eq!(ti.ggml_type, target, "tensor {} dtype mismatch", ti.name);
         // Verify byte_size matches the per-block formula.
         let n_elems: u64 = ti.dims.iter().take(ti.n_dims as usize).product();
-        let expected = spynaltap::formats::gguf::types::byte_size_for(n_elems, target);
+        let expected = crate::formats::gguf::types::byte_size_for(n_elems, target);
         assert_eq!(
             ti.byte_size, expected,
             "tensor {} byte_size mismatch",

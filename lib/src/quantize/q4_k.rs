@@ -103,16 +103,13 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
 
         // Enforce canonical Q4_K layout coupling: for sub-blocks 4..7, the
         // low 4 bits of sc[s] and mn[s] MUST be the same (they share one
-        // byte), and the high 2 bits come from the 6-bit slot of sub-block
-        // s-4 (for sc) / mn slot of s-4 (for mn). Pick the shared lo that
-        // minimizes the sub-block quantization error by searching over
-        // lo = 1..15. With (sc, mn) = (lo, lo), the dequant for each
-        // element v is q = round((v + dmin*lo) / (d*lo)) and
-        // recon = d*lo*q - dmin*lo, so a direct search over 15 candidates
-        // is cheap. A real llama.cpp encoder also tries asymmetric (sc,
-        // mn) by encoding in the high-2 slots of the 6-bit sc/mn of
-        // sub-block s-4; for 6-bit values the high 2 is 0, so the search
-        // collapses to the symmetric case here.
+        // byte), while the high 2 bits (bits 4-5) are stored independently
+        // in the high 2 bits of the 6-bit scale slots for sub-blocks s-4
+        // (sc) and s (mn). Search over all 15×4×4 = 240 combinations of
+        // (shared_lo, sc_high_nibble, mn_high_nibble) to find the best fit.
+        // The high nibble is only 2 bits (range 0..3) because sc, mn are
+        // 6-bit values; packing shifts them into bits 6-7 of the first-half
+        // scale bytes so that `get_scale_min_k4` recovers them correctly.
         for s in 4..N_SUB {
             if sc[s] == 0 && mn[s] == 0 {
                 continue;
@@ -124,35 +121,45 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
             }
             let sub = &blk[s * SUB..(s + 1) * SUB];
             let mut best_lo: u8 = 1;
+            let mut best_sc_h: u8 = 0;
+            let mut best_mn_h: u8 = 0;
             let mut best_err = f32::INFINITY;
             for lo in 1u8..=15u8 {
-                let d_sc = d * lo as f32;
-                let m_sc = dmin * lo as f32;
-                let mut err_max = 0.0f32;
-                for &v in sub {
-                    if d_sc == 0.0 {
-                        continue;
+                for sc_h in 0u8..=3u8 {
+                    for mn_h in 0u8..=3u8 {
+                        let sc_val = lo | (sc_h << 4);
+                        let mn_val = lo | (mn_h << 4);
+                        let d_sc = d * sc_val as f32;
+                        let m_sc = dmin * mn_val as f32;
+                        let mut err_max = 0.0f32;
+                        for &v in sub {
+                            if d_sc == 0.0 {
+                                continue;
+                            }
+                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 15.0) as f32;
+                            let recon = d_sc * q - m_sc;
+                            let e = (v - recon).abs();
+                            if e > err_max {
+                                err_max = e;
+                            }
+                        }
+                        if err_max < best_err {
+                            best_err = err_max;
+                            best_lo = lo;
+                            best_sc_h = sc_h;
+                            best_mn_h = mn_h;
+                        }
                     }
-                    let q = ((v + m_sc) / d_sc).round().clamp(0.0, 15.0) as f32;
-                    let recon = d_sc * q - m_sc;
-                    let e = (v - recon).abs();
-                    if e > err_max {
-                        err_max = e;
-                    }
-                }
-                if err_max < best_err {
-                    best_err = err_max;
-                    best_lo = lo;
                 }
             }
-            sc[s] = best_lo;
-            mn[s] = best_lo;
+            sc[s] = best_lo | (best_sc_h << 4);
+            mn[s] = best_lo | (best_mn_h << 4);
         }
 
         let mut packed = [0u8; 12];
         for s in 0..4 {
-            packed[s] = sc[s];
-            packed[4 + s] = mn[s];
+            packed[s] = sc[s] | (((sc[4 + s] >> 4) & 0x03) << 6);
+            packed[4 + s] = mn[s] | (((mn[4 + s] >> 4) & 0x03) << 6);
         }
         for s in 4..N_SUB {
             let j = s - 4;

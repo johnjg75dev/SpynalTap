@@ -1,4 +1,4 @@
-use spynaltap::prune::selection::{parse_index_list, parse_selection, Selection};
+use crate::prune::selection::{parse_index_list, parse_selection, Selection};
 
 #[test]
 fn selection_all() {
