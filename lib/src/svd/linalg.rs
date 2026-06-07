@@ -55,20 +55,177 @@ impl Mat {
     }
 
     /// `out = a * b`. `a` is m x k, `b` is k x n, `out` is m x n.
+    /// Dispatches to cache-blocked SIMD (AVX2+FMA) when available,
+    /// tiled scalar otherwise. Tiny matrices use a reordered naive path.
     pub fn matmul_into(a: &Mat, b: &Mat, out: &mut Mat) {
         assert_eq!(a.cols, b.rows, "matmul: inner dims must match");
         assert_eq!(out.rows, a.rows, "matmul: out rows must match a rows");
         assert_eq!(out.cols, b.cols, "matmul: out cols must match b cols");
-        let m = a.rows;
-        let k = a.cols;
-        let n = b.cols;
-        for i in 0..m {
+        matmul_dispatch(a, b, out);
+    }
+}
+
+// ---- matmul internals --------------------------------------------------
+
+/// Skip tiling overhead for matrices this small.
+const MATMUL_SMALL_MN: usize = 256;
+const MATMUL_MIN_K:  usize = 32;
+
+fn matmul_dispatch(a: &Mat, b: &Mat, out: &mut Mat) {
+    let m = a.rows;
+    let k = a.cols;
+    let n = b.cols;
+
+    if m * n <= MATMUL_SMALL_MN || k < MATMUL_MIN_K {
+        matmul_naive(a, b, out);
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            unsafe {
+                matmul_tiled_avx2(a, b, out);
+            }
+            return;
+        }
+    }
+
+    matmul_tiled_scalar(a, b, out);
+}
+
+/// Reordered naive triple-loop for tiny matrices.
+/// Inner loops: i → p → j, so B is accessed contiguously.
+fn matmul_naive(a: &Mat, b: &Mat, out: &mut Mat) {
+    let m = a.rows;
+    let k = a.cols;
+    let n = b.cols;
+    out.data[..m * n].fill(0.0);
+    for i in 0..m {
+        let out_row = &mut out.data[i * n..];
+        for p in 0..k {
+            let a_val = a.data[i * k + p];
+            let b_row = &b.data[p * n..];
             for j in 0..n {
-                let mut s = 0.0f32;
-                for p in 0..k {
-                    s += a.data[i * k + p] * b.data[p * n + j];
+                out_row[j] += a_val * b_row[j];
+            }
+        }
+    }
+}
+
+/// Cache-blocked scalar matmul. Tiles the output 64×64 so the working set
+/// of `b` stays resident in L1/L2. Uses an outer-product inner loop for
+/// good row-major spatial locality on A, B, and C.
+fn matmul_tiled_scalar(a: &Mat, b: &Mat, out: &mut Mat) {
+    let m = a.rows;
+    let k = a.cols;
+    let n = b.cols;
+
+    const BM: usize = 64;
+    const BN: usize = 64;
+    const BK: usize = 64;
+
+    out.data[..m * n].fill(0.0);
+
+    for ib in (0..m).step_by(BM) {
+        let ib_end = (ib + BM).min(m);
+        for pb in (0..k).step_by(BK) {
+            let pb_end = (pb + BK).min(k);
+            for jb in (0..n).step_by(BN) {
+                let jb_end = (jb + BN).min(n);
+
+                for i in ib..ib_end {
+                    let a_row = i * k;
+                    let c_row = i * n;
+                    for pp in pb..pb_end {
+                        let a_val = a.data[a_row + pp];
+                        let b_row = pp * n;
+
+                        let mut j = jb;
+                        // Unrolled ×4 for ILP.
+                        while j + 4 <= jb_end {
+                            let b0 = b.data[b_row + j];
+                            let b1 = b.data[b_row + j + 1];
+                            let b2 = b.data[b_row + j + 2];
+                            let b3 = b.data[b_row + j + 3];
+                            out.data[c_row + j]     += a_val * b0;
+                            out.data[c_row + j + 1] += a_val * b1;
+                            out.data[c_row + j + 2] += a_val * b2;
+                            out.data[c_row + j + 3] += a_val * b3;
+                            j += 4;
+                        }
+                        while j < jb_end {
+                            out.data[c_row + j] += a_val * b.data[b_row + j];
+                            j += 1;
+                        }
+                    }
                 }
-                out.data[i * n + j] = s;
+            }
+        }
+    }
+}
+
+// ---- AVX2+FMA matmul (x86_64 only) -------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+const BM_AVX2: usize = 128;
+#[cfg(target_arch = "x86_64")]
+const BN_AVX2: usize = 128;
+#[cfg(target_arch = "x86_64")]
+const BK_AVX2: usize = 64;
+
+/// Cache-blocked outer-product matmul using `f32x8` AVX2 FMA intrinsics.
+/// Processes 8 columns of B / C per `_mm256_fmadd_ps` instruction.
+///
+/// # Safety
+/// Caller must verify AVX2 + FMA are available at runtime
+/// (`is_x86_feature_detected!` at the dispatch site).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn matmul_tiled_avx2(a: &Mat, b: &Mat, out: &mut Mat) {
+    use std::arch::x86_64::*;
+
+    let m = a.rows;
+    let k = a.cols;
+    let n = b.cols;
+
+    out.data.fill(0.0);
+
+    for ib in (0..m).step_by(BM_AVX2) {
+        let ib_end = (ib + BM_AVX2).min(m);
+        for pb in (0..k).step_by(BK_AVX2) {
+            let pb_end = (pb + BK_AVX2).min(k);
+            for jb in (0..n).step_by(BN_AVX2) {
+                let jb_end = (jb + BN_AVX2).min(n);
+
+                for i in ib..ib_end {
+                    let a_off = i * k;
+                    let c_off = i * n;
+                    for pp in pb..pb_end {
+                        let a_val = _mm256_set1_ps(*a.data.get_unchecked(a_off + pp));
+
+                        let mut j = jb;
+                        // 8-wide FMA: C[i][j..j+7] += A[i][pp] * B[pp][j..j+7]
+                        while j + 8 <= jb_end {
+                            let b_ptr = b.data.as_ptr().add(pp * n + j);
+                            let c_ptr = out.data.as_ptr().add(c_off + j);
+                            let b_vec = _mm256_loadu_ps(b_ptr);
+                            let c_vec = _mm256_loadu_ps(c_ptr);
+                            _mm256_storeu_ps(
+                                out.data.as_mut_ptr().add(c_off + j),
+                                _mm256_fmadd_ps(a_val, b_vec, c_vec),
+                            );
+                            j += 8;
+                        }
+                        // Tail: 0–7 columns.
+                        while j < jb_end {
+                            *out.data.get_unchecked_mut(c_off + j) +=
+                                a.data.get_unchecked(a_off + pp) *
+                                    b.data.get_unchecked(pp * n + j);
+                            j += 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -110,58 +267,61 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
 
     while sweep < max_sweeps {
         sweep += 1;
-        // Compute A^T A diagonal (squared column norms) and off-diagonal norm.
-        let mut col_norms_sq = vec![0.0f64; n];
-        for c in 0..n {
-            let mut s = 0.0f64;
-            for r in 0..m {
-                let x = work.data[r * n + c] as f64;
-                s += x * x;
-            }
-            col_norms_sq[c] = s;
-        }
-        let mut off_sq = 0.0f64;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let mut s = 0.0f64;
-                for r in 0..m {
-                    let x = work.data[r * n + i] as f64;
-                    let y = work.data[r * n + j] as f64;
-                    s += x * y;
-                }
-                off_sq += s * s;
-            }
-        }
-        if off_sq <= target_off {
-            break;
-        }
 
-        // One sweep: for each pair (i, j) with i < j, apply a 2x2 Jacobi
-        // rotation to the columns of `work` and to `v`.
-        let mut any_change = false;
+        // Track off-diagonal frobenius norm during the sweep instead of
+        // doing a separate pre-sweep convergence check. This eliminates
+        // one full pass over all n*(n-1)/2 column-pairs per sweep.
+        let mut off_sq = 0.0f64;
+
         for i in 0..n {
             for j in (i + 1)..n {
-                // Reuse the cached diagonal; recompute the (i, j) element of A^T A.
+                // Compute alpha (||col_i||²), beta (||col_j||²), gamma
+                // (col_i · col_j) in one pass over rows. Unrolled ×4 for
+                // ILP and reduced loop overhead.
                 let mut alpha = 0.0f64;
-                let mut beta = 0.0f64;
+                let mut beta  = 0.0f64;
                 let mut gamma = 0.0f64;
-                for r in 0..m {
-                    let x = work.data[r * n + i] as f64;
-                    let y = work.data[r * n + j] as f64;
+
+                let mut r = 0;
+                while r + 4 <= m {
+                    let x0 = work.data[r * n + i] as f64;
+                    let y0 = work.data[r * n + j] as f64;
+                    let x1 = work.data[(r + 1) * n + i] as f64;
+                    let y1 = work.data[(r + 1) * n + j] as f64;
+                    let x2 = work.data[(r + 2) * n + i] as f64;
+                    let y2 = work.data[(r + 2) * n + j] as f64;
+                    let x3 = work.data[(r + 3) * n + i] as f64;
+                    let y3 = work.data[(r + 3) * n + j] as f64;
+
+                    alpha += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
+                    beta  += y0 * y0 + y1 * y1 + y2 * y2 + y3 * y3;
+                    gamma += x0 * y0 + x1 * y1 + x2 * y2 + x3 * y3;
+
+                    r += 4;
+                }
+                // Tail: 0–3 rows.
+                for rr in r..m {
+                    let x = work.data[rr * n + i] as f64;
+                    let y = work.data[rr * n + j] as f64;
                     alpha += x * x;
-                    beta += y * y;
+                    beta  += y * y;
                     gamma += x * y;
                 }
+
+                // Accumulate off-diagonal energy before potentially zeroing
+                // this pair via a rotation.
+                off_sq += gamma * gamma;
+
                 if gamma == 0.0 {
                     continue;
                 }
 
-                // Closed-form Jacobi rotation that diagonalizes [[alpha, gamma], [gamma, beta]].
+                // Closed-form Jacobi rotation that diagonalizes
+                // [[alpha, gamma], [gamma, beta]].
                 let (c_rot, s_rot) = jacobi_2x2(alpha, beta, gamma);
                 if s_rot.abs() < 1e-30 {
                     continue;
                 }
-                any_change = true;
 
                 // Apply to `work` columns i, j in place.
                 for r in 0..m {
@@ -177,13 +337,10 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
                     v.data[r * n + i] = (c_rot * vi + s_rot * vj) as f32;
                     v.data[r * n + j] = (-s_rot * vi + c_rot * vj) as f32;
                 }
-                // Update cached norms.
-                col_norms_sq[i] = alpha;
-                col_norms_sq[j] = beta;
-                let _ = gamma; // gamma -> 0 after rotation; ignored.
             }
         }
-        if !any_change {
+
+        if off_sq <= target_off {
             break;
         }
     }

@@ -18,10 +18,13 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], max: usize) -> Option<Vec<f32>> {
             GgmlType::Q5_0 => dequant_q5_0(bytes),
             GgmlType::Q5_1 => dequant_q5_1(bytes),
             GgmlType::Q8_0 => dequant_q8_0(bytes),
+            GgmlType::Q8_1 => dequant_q8_1(bytes),
             GgmlType::Q4K => dequant_q4_k(bytes),
             GgmlType::Q5K => dequant_q5_k(bytes),
             GgmlType::Q6K => dequant_q6_k(bytes),
             GgmlType::Q8K => dequant_q8_k(bytes),
+            GgmlType::Q2K => dequant_q2_k(bytes),
+            GgmlType::Q3K => dequant_q3_k(bytes),
             _ => return None,
         },
         max,
@@ -319,4 +322,144 @@ fn dequant_q8_k(bytes: &[u8]) -> Vec<f32> {
         }
     }
     out
+}
+
+// -- Q8_1 ---------------------------------------------------------------------
+
+/// Q8_1: 36 bytes / 32 elements.  f16 d, f16 _sum, 32× u8 quants.
+/// Dequant: `xi = d * qi` where qi is the u8 quant (signed via i8 cast).
+#[inline]
+fn dequant_q8_1(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 36;
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * 32);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        // blk[2..4] is f16 sum (unused in dequant)
+        for j in 0..32 {
+            let q = blk[4 + j] as i8 as f32;
+            out.push(d * q);
+        }
+    }
+    out
+}
+
+// -- Q2_K ---------------------------------------------------------------------
+
+/// Q2_K: 82 bytes / 256 elements.
+///
+/// Layout per super-block (llama.cpp `block_q2_K`):
+/// ```text
+///   qs[64]       — 64 bytes, each holding 4× 2-bit quants
+///   d            — 2 bytes f16 super-block scale
+///   scales[16]   — 16 bytes; each byte packs:
+///                    low 4 bits = sub-block scale
+///                    high 4 bits = sub-block min
+/// ```
+///
+/// Dequant formula: `d * (q * sc - mn)` where
+/// `q` is the 2-bit quant value, `sc` and `mn` are per-sub-block.
+#[inline]
+fn dequant_q2_k(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 82; // 64 qs + 2 d + 16 scales
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let qs = &blk[0..64];
+        let d = f16_to_f32(u16::from_le_bytes([blk[64], blk[65]]));
+        let scales = &blk[66..82]; // 16 bytes
+
+        let mut block_out = [0.0f32; QK_K];
+        let mut is = 0usize;
+        // Two halves of 128 elements each, using qs[0..32] and qs[32..64].
+        for half in 0..2 {
+            let q_base = half * 32;
+            let mut shift = 0usize;
+            for _j in 0..4 {
+                // First sub-block of 16 elements.
+                {
+                    let sc = scales[is];
+                    let dl = d * (sc & 0x0F) as f32; // lower nibble = scale
+                    let ml = d * (sc >> 4) as f32; // upper nibble = min
+                    is += 1;
+                    for l in 0..16 {
+                        let qi = ((qs[q_base + l] >> shift) & 3) as f32;
+                        let idx = half * 128 + _j * 32 + l;
+                        block_out[idx] = dl * qi - ml;
+                    }
+                }
+                // Second sub-block of 16 elements.
+                {
+                    let sc = scales[is];
+                    let dl = d * (sc & 0x0F) as f32;
+                    let ml = d * (sc >> 4) as f32;
+                    is += 1;
+                    for l in 0..16 {
+                        let qi = ((qs[q_base + 16 + l] >> shift) & 3) as f32;
+                        let idx = half * 128 + _j * 32 + 16 + l;
+                        block_out[idx] = dl * qi - ml;
+                    }
+                }
+                shift += 2;
+            }
+        }
+        out.extend_from_slice(&block_out);
+    }
+    out
+}
+
+// -- Q3_K ---------------------------------------------------------------------
+
+/// Q3_K: 110 bytes / 256 elements.
+///
+/// Layout per super-block (llama.cpp `block_q3_K`):
+/// ```text
+///   hmask[32]    — 32 bytes, 1-bit high parts (256 bits)
+///   qs[64]       — 64 bytes, 2-bit low parts (4 quants per byte)
+///   d            — 2 bytes f16 super-block scale
+///   scales[12]   — 12-byte scale table (6-bit sc + 2-bit high packed, like Q4_K)
+/// ```
+///
+/// Dequant formula: `d * q * sc` where `q` is the 3-bit quant
+/// (2 low bits from qs, 1 high bit from hmask) and `sc` is the sub-block scale.
+#[inline]
+fn dequant_q3_k(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 110; // 32 hmask + 64 qs + 2 d + 12 scales
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    let mut sc_buf = [0u8; 12];
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let hmask = &blk[0..32];
+        let qs = &blk[32..96];
+        let d = f16_to_f32(u16::from_le_bytes([blk[96], blk[97]]));
+        sc_buf.copy_from_slice(&blk[98..110]);
+
+        for j in 0..QK_K {
+            let sub = j / 32; // 8 sub-blocks of 32 elements
+            let sc = get_q3_k_scale(&sc_buf, sub);
+            let d_sc = d * sc as f32;
+
+            // Low 2 bits from qs (packed like Q4_K: lower nibble first half, upper nibble second half)
+            let ql = if j < QK_K / 2 {
+                (qs[j] & 0x0F) as i32
+            } else {
+                ((qs[j - QK_K / 2] >> 4) & 0x0F) as i32
+            };
+            // High 1 bit from hmask
+            let h = ((hmask[j / 8] >> (j % 8)) & 1) as i32;
+            let q = ql - 16 + h * 2;
+            out.push(d_sc * q as f32);
+        }
+    }
+    out
+}
+
+/// Extract the scale for sub-block `j` (0..7) from a Q3_K 12-byte scale table.
+/// Q3_K scales use the same "shared high-2" packing as Q5_K:
+///   sc[j] = (scales[j] & 0x3F) | ((scales[8 + (j >> 2)] >> ((j & 3) * 2)) & 3) << 6
+#[inline]
+fn get_q3_k_scale(scales: &[u8; 12], j: usize) -> u8 {
+    let lo = scales[j] & 0x3F;
+    let hi = (scales[8 + (j >> 2)] >> ((j & 3) * 2)) & 3;
+    lo | (hi << 6)
 }

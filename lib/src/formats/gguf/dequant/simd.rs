@@ -18,7 +18,8 @@ pub(crate) unsafe fn try_dequant(ty: GgmlType, bytes: &[u8], max: usize) -> Opti
         GgmlType::Bf16 => unsafe { dequant_bf16_avx2(bytes, max) },
         GgmlType::Q4_0 => unsafe { dequant_q4_0_avx2(bytes, max) },
         GgmlType::Q8_0 => unsafe { dequant_q8_0_avx2(bytes, max) },
-        // Vectorized paths for K-quants are pending; let scalar handle them.
+        GgmlType::Q8_1 => unsafe { dequant_q8_1_avx2(bytes, max) },
+        // K-quants and I-quants aren't vectorized yet; scalar handles them.
         _ => return None,
     })
 }
@@ -163,36 +164,40 @@ unsafe fn dequant_q4_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
 
 #[target_feature(enable = "avx2")]
 unsafe fn dequant_q8_0_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
-    let n_blocks = bytes.len() / 34;
+    dequant_q8_block_avx2(bytes, max, 34, 2)
+}
+
+// -- Q8_1 (32 elements / 36 bytes) -------------------------------------------
+// Identical to Q8_0 except the block header is 4 bytes (d + sum) instead of 2.
+
+#[target_feature(enable = "avx2")]
+unsafe fn dequant_q8_1_avx2(bytes: &[u8], max: usize) -> Vec<f32> {
+    dequant_q8_block_avx2(bytes, max, 36, 4)
+}
+
+/// Shared AVX2 dequant for Q8_0 / Q8_1 block formats.
+/// `stride` is bytes per block (34 for Q8_0, 36 for Q8_1).
+/// `qs_off` is offset to the byte array of 32 i8 quants (2 for Q8_0, 4 for Q8_1).
+#[target_feature(enable = "avx2")]
+unsafe fn dequant_q8_block_avx2(bytes: &[u8], max: usize, stride: usize, qs_off: usize) -> Vec<f32> {
+    let n_blocks = bytes.len() / stride;
     let mut out: Vec<f32> = Vec::with_capacity(n_blocks * 32);
 
-    for blk in bytes.chunks_exact(34) {
+    for blk in bytes.chunks_exact(stride) {
         let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-        let qs = &blk[2..34]; // 32 i8s
+        let qs = &blk[qs_off..qs_off + 32];
+        let d_v = _mm256_set1_ps(d);
 
-        // Load 32 i8s as a 256-bit register.
         let v_i8 = _mm256_loadu_si256(qs.as_ptr() as *const __m256i);
-
-        // Split into low and high 128-bit halves. We need 4 calls to
-        // `_mm256_cvtepi8_epi32` because each one only widens the lower 8 of
-        // its 16 input bytes.
         let lo = _mm256_castsi256_si128(v_i8);
         let hi = _mm256_extracti128_si256(v_i8, 1);
-
         let lo_hi = _mm_bsrli_si128(lo, 8);
         let hi_hi = _mm_bsrli_si128(hi, 8);
 
-        let i32_0 = _mm256_cvtepi8_epi32(lo);
-        let i32_1 = _mm256_cvtepi8_epi32(lo_hi);
-        let i32_2 = _mm256_cvtepi8_epi32(hi);
-        let i32_3 = _mm256_cvtepi8_epi32(hi_hi);
-
-        // i32 -> f32, then multiply by d.
-        let d_v = _mm256_set1_ps(d);
-        let f0 = _mm256_mul_ps(_mm256_cvtepi32_ps(i32_0), d_v);
-        let f1 = _mm256_mul_ps(_mm256_cvtepi32_ps(i32_1), d_v);
-        let f2 = _mm256_mul_ps(_mm256_cvtepi32_ps(i32_2), d_v);
-        let f3 = _mm256_mul_ps(_mm256_cvtepi32_ps(i32_3), d_v);
+        let f0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)), d_v);
+        let f1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo_hi)), d_v);
+        let f2 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)), d_v);
+        let f3 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi_hi)), d_v);
 
         let base = out.as_mut_ptr().add(out.len());
         _mm256_storeu_ps(base, f0);
