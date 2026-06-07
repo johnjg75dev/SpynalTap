@@ -83,6 +83,58 @@ fn dequant_max_elems_truncates() {
 #[test]
 fn dequant_unsupported_returns_none() {
     let bytes = vec![0u8; 16];
-    let v = dequant::dequantize(GgmlType::Iq1S, &bytes, None);
+    let v = dequant::dequantize(GgmlType::Unknown(99), &bytes, None);
     assert!(v.is_none());
+}
+
+#[test]
+fn dequant_iq4_nl_zero_block() {
+    // IQ4_NL block: 2 d (f16) + 16 qs nibbles = 18 bytes; 32 values
+    let mut bytes = vec![0u8; 18];
+    bytes[0] = 0x00;
+    bytes[1] = 0x3c; // d = 1.0 f16
+    let v = dequant::dequantize(GgmlType::Iq4Nl, &bytes, None).expect("iq4_nl should dequantize");
+    assert_eq!(v.len(), 32);
+    // d=1.0, all quants = KVALUES_IQ4NL[0] = -127, so values = -127.0
+    for &x in &v {
+        assert!((x - (-127.0)).abs() < 1e-3, "got {x}");
+    }
+}
+
+#[test]
+fn dequant_iq4_nl_table_index() {
+    // All nibbles = 0x07 → KVALUES_IQ4NL[7] = -10
+    let mut bytes = vec![0u8; 18];
+    bytes[0] = 0x00;
+    bytes[1] = 0x3c; // d = 1.0
+    for i in 2..18 { bytes[i] = 0x77; } // lo=7, hi=7
+    let v = dequant::dequantize(GgmlType::Iq4Nl, &bytes, None).unwrap();
+    for &x in &v {
+        assert!((x - (-10.0)).abs() < 1e-3, "got {x}");
+    }
+}
+
+#[test]
+fn dequant_tq2_0_basic() {
+    // TQ2_0: 2 d (f16) + 64 qs bytes = 66 bytes; 256 values
+    // Each byte holds 4 × 2-bit quants mapping to -1, 0, 1
+    let mut bytes = vec![0u8; 66];
+    bytes[0] = 0x00;
+    bytes[1] = 0x3c; // d = 1.0
+    for i in 2..66 { bytes[i] = 0xAA; } // lo=2,hi=2,lo=2,hi=2 → all 1.0
+    let v = dequant::dequantize(GgmlType::Tq2_0, &bytes, None).unwrap();
+    assert_eq!(v.len(), 256);
+    for &x in &v {
+        assert!((x - 1.0).abs() < 1e-3, "got {x}");
+    }
+}
+
+#[test]
+fn dequant_i8_basic() {
+    let bytes: Vec<u8> = (0..16).map(|i| (i as i8) as u8).collect();
+    let v = dequant::dequantize(GgmlType::I8, &bytes, None).unwrap();
+    assert_eq!(v.len(), 16);
+    for (i, &x) in v.iter().enumerate() {
+        assert_eq!(x, i as f32);
+    }
 }

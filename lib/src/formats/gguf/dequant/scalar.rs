@@ -4,6 +4,7 @@
 //! All hot loops are marked `#[inline]` for the compiler; LLVM unrolls the
 //! 32-element block loops aggressively at `-O3`.
 
+use super::lookup::{IQ1S_DELTA, IQ1S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
 use super::truncate_to;
 use crate::formats::gguf::types::GgmlType;
 
@@ -25,6 +26,20 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], max: usize) -> Option<Vec<f32>> {
             GgmlType::Q8K => dequant_q8_k(bytes),
             GgmlType::Q2K => dequant_q2_k(bytes),
             GgmlType::Q3K => dequant_q3_k(bytes),
+            GgmlType::Iq1S => dequant_iq1_s(bytes),
+            GgmlType::Iq2Xxs => dequant_iq2_xxs(bytes),
+            GgmlType::Iq2Xs => dequant_iq2_xs(bytes),
+            GgmlType::Iq3Xxs => dequant_iq3_xxs(bytes),
+            GgmlType::Iq3S => dequant_iq3_s(bytes),
+            GgmlType::Iq4Nl => dequant_iq4_nl(bytes),
+            GgmlType::Iq4Xs => dequant_iq4_xs(bytes),
+            GgmlType::Tq1_0 => dequant_tq1_0(bytes),
+            GgmlType::Tq2_0 => dequant_tq2_0(bytes),
+            GgmlType::I8 => scan_i8(bytes),
+            GgmlType::I16 => scan_i16(bytes),
+            GgmlType::I32 => scan_i32(bytes),
+            GgmlType::I64 => scan_i64(bytes),
+            GgmlType::F64 => scan_f64(bytes),
             _ => return None,
         },
         max,
@@ -462,4 +477,390 @@ fn get_q3_k_scale(scales: &[u8; 12], j: usize) -> u8 {
     let lo = scales[j] & 0x3F;
     let hi = (scales[8 + (j >> 2)] >> ((j & 3) * 2)) & 3;
     lo | (hi << 6)
+}
+
+// -- I8 / I16 / I32 / I64 / F64 scalar types --------------------------------
+
+#[inline]
+fn scan_i8(bytes: &[u8]) -> Vec<f32> {
+    bytes.iter().map(|&b| (b as i8) as f32).collect()
+}
+
+#[inline]
+fn scan_i16(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for c in bytes.chunks_exact(2) {
+        out.push(i16::from_le_bytes([c[0], c[1]]) as f32);
+    }
+    out
+}
+
+#[inline]
+fn scan_i32(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for c in bytes.chunks_exact(4) {
+        out.push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32);
+    }
+    out
+}
+
+#[inline]
+fn scan_i64(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 8);
+    for c in bytes.chunks_exact(8) {
+        out.push(i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32);
+    }
+    out
+}
+
+#[inline]
+fn scan_f64(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 8);
+    for c in bytes.chunks_exact(8) {
+        out.push(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32);
+    }
+    out
+}
+
+// -- IQ4_NL (4-bit, 32 elements/block) --------------------------------------
+
+/// IQ4_NL: 18 bytes / 32 elements. Same block layout as Q4_0 but
+/// the 16 4-bit values index into the KVALUES_IQ4NL non-linear table
+/// (which includes negative values, so no -8 offset is needed).
+#[inline]
+fn dequant_iq4_nl(bytes: &[u8]) -> Vec<f32> {
+    let n_blocks = bytes.len() / 18;
+    let mut out = Vec::with_capacity(n_blocks * 32);
+    for blk in bytes.chunks_exact(18) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        for j in 0..16 {
+            let lo = (blk[2 + j] & 0x0F) as usize;
+            let hi = ((blk[2 + j] >> 4) & 0x0F) as usize;
+            out.push(d * KVALUES_IQ4NL[lo] as f32);
+            out.push(d * KVALUES_IQ4NL[hi] as f32);
+        }
+    }
+    out
+}
+
+// -- IQ4_XS (4-bit, 256 elements/block) -------------------------------------
+
+/// IQ4_XS block layout: 2 bytes d (f16), 4 bytes scales_h/scales_l (2 bytes each),
+/// 128 bytes of qs (16 sub-blocks × 16 bytes of 4-bit quants indexed into KVALUES_IQ4NL).
+/// Block size: 2 + 4 + 128 = 134 bytes per 256 elements. Wait — actually
+/// the IQ4_XS block is 136 bytes. Per-block: 2 d, 2 scales_l, 1 scales_h, 1 unused, 128 qs.
+#[inline]
+fn dequant_iq4_xs(bytes: &[u8]) -> Vec<f32> {
+    // IQ4_XS block: d[2] scales_l[4] scales_h[2] qs[128] = 136 bytes
+    const BLOCK_SIZE: usize = 136;
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let scales_l = &blk[2..6];
+        let scales_h = u16::from_le_bytes([blk[6], blk[7]]);
+        let qs = &blk[8..136];
+        for ib in 0..8 {
+            let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) as u16 & 0x0F)
+                | (((scales_h >> (2 * ib)) & 0x03) << 4);
+            let dl = d * (ls as i32 - 32) as f32;
+            let qb = &qs[ib * 16..ib * 16 + 16];
+            for j in 0..16 {
+                let lo = (qb[j] & 0x0F) as usize;
+                let hi = ((qb[j] >> 4) & 0x0F) as usize;
+                out.push(dl * KVALUES_IQ4NL[lo] as f32);
+                out.push(dl * KVALUES_IQ4NL[hi] as f32);
+            }
+        }
+    }
+    out
+}
+
+// -- IQ2_XXS (256 elements/block) -------------------------------------------
+
+/// IQ2_XXS block layout: 2 d (f16), 64 qs bytes = 66 bytes / 256 elements.
+/// qs is read as 32 uint32s: each uint32 packs (idx_low[9b] in aux8[0..1],
+/// idx_high packed bits, plus the scale/sigs in aux32[1]).
+/// Reference: llama.cpp `dequantize_row_iq2_xxs`.
+#[inline]
+fn dequant_iq2_xxs(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 66; // 2 d + 64 qs
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..66];
+        for ib32 in 0..8 {
+            let aux32_off = ib32 * 8;
+            let a0 = u32::from_le_bytes([qs[aux32_off], qs[aux32_off + 1], qs[aux32_off + 2], qs[aux32_off + 3]]);
+            let a1 = u32::from_le_bytes([qs[aux32_off + 4], qs[aux32_off + 5], qs[aux32_off + 6], qs[aux32_off + 7]]);
+            let db = d * (0.5 + ((a1 >> 28) as f32)) * 0.25;
+            for l in 0..4 {
+                let grid_off = ((a0 >> (8 * l)) & 0xFF) as usize;
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ2XXS_GRID.as_ptr() as *const u8).add(grid_off),
+                        8,
+                    )
+                };
+                let signs = KSIGNS_IQ2XS[((a1 >> (7 * l)) & 0x7F) as usize];
+                for j in 0..8 {
+                    let v = grid[j] as f32;
+                    let sgn = if signs & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    out.push(db * v * sgn);
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ2_XS (256 elements/block) -------------------------------------------
+
+/// IQ2_XS block layout: 2 d (f16), 8 scales, 64 qs = 74 bytes / 256 elements.
+#[inline]
+fn dequant_iq2_xs(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 74; // 2 d + 8 scales + 64 qs
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let scales = &blk[2..10];
+        let qs = &blk[10..74];
+        let mut db = [0.0f32; 2];
+        for ib32 in 0..8 {
+            db[0] = d * (0.5 + (scales[ib32] & 0x0F) as f32) * 0.25;
+            db[1] = d * (0.5 + (scales[ib32] >> 4) as f32) * 0.25;
+            for l in 0..4 {
+                let q_byte = qs[ib32 * 4 + l];
+                let grid_off = ((q_byte as u16) & 0x1FF) as usize;
+                let signs = KSIGNS_IQ2XS[((q_byte as u16) >> 9) as usize];
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ2XS_GRID.as_ptr() as *const u8).add(grid_off),
+                        8,
+                    )
+                };
+                let dl = db[l / 2];
+                for j in 0..8 {
+                    let v = grid[j] as f32;
+                    let sgn = if signs & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    out.push(dl * v * sgn);
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ3_XXS (256 elements/block) ------------------------------------------
+
+/// IQ3_XXS block layout: 2 d (f16), 64 qs (which also embeds scales/signs
+/// in the upper 4 bits of every 4th byte group) = 66 bytes / 256 elements.
+#[inline]
+fn dequant_iq3_xxs(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 98; // 2 d + 96 qs (qs+scales_and_signs)
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..66];
+        let scs = &blk[66..98];
+        for ib32 in 0..8 {
+            let aux32 = u32::from_le_bytes([scs[ib32 * 4], scs[ib32 * 4 + 1], scs[ib32 * 4 + 2], scs[ib32 * 4 + 3]]);
+            let db = d * (0.5 + ((aux32 >> 28) as f32)) * 0.5;
+            for l in 0..4 {
+                let signs = KSIGNS_IQ2XS[((aux32 >> (7 * l)) & 0x7F) as usize];
+                let g1 = qs[ib32 * 8 + 2 * l] as usize;
+                let g2 = qs[ib32 * 8 + 2 * l + 1] as usize;
+                let grid1 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3XXS_GRID.as_ptr() as *const u8).add(g1),
+                        4,
+                    )
+                };
+                let grid2 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3XXS_GRID.as_ptr() as *const u8).add(g2),
+                        4,
+                    )
+                };
+                for j in 0..4 {
+                    let s1 = if signs & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    let s2 = if signs & KMASK_IQ2XS[j + 4] != 0 { -1.0 } else { 1.0 };
+                    out.push(db * (grid1[j] as f32) * s1);
+                    out.push(db * (grid2[j] as f32) * s2);
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ3_S (256 elements/block) --------------------------------------------
+
+/// IQ3_S block layout: 2 d (f16), 1 hmask[32], 32 qs, 32 signs, 4 scales = 110 bytes.
+#[inline]
+fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 110;
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qh = &blk[2..34];
+        let qs = &blk[34..98];
+        let signs = &blk[98..102]; // 32 bytes
+        let scales = &blk[102..110];
+        for ib32 in (0..8).step_by(2) {
+            let db1 = d * (1.0 + 2.0 * (scales[ib32 / 2] & 0x0F) as f32);
+            let db2 = d * (1.0 + 2.0 * (scales[ib32 / 2] >> 4) as f32);
+            for l in 0..4 {
+                let g1 = (qs[ib32 * 4 + 2 * l] as usize)
+                    | (((qh[ib32] as u16) << (8 - 2 * l) & 0x100) as usize);
+                let g2 = (qs[ib32 * 4 + 2 * l + 1] as usize)
+                    | (((qh[ib32] as u16) << (7 - 2 * l) & 0x100) as usize);
+                let grid1 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3S_GRID.as_ptr() as *const u8).add(g1),
+                        4,
+                    )
+                };
+                let grid2 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3S_GRID.as_ptr() as *const u8).add(g2),
+                        4,
+                    )
+                };
+                let s_byte = signs[ib32 * 4 + l];
+                for j in 0..4 {
+                    let s1 = if s_byte & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    let s2 = if s_byte & KMASK_IQ2XS[j + 4] != 0 { -1.0 } else { 1.0 };
+                    out.push(db1 * (grid1[j] as f32) * s1);
+                    out.push(db1 * (grid2[j] as f32) * s2);
+                }
+            }
+            for l in 0..4 {
+                let g1 = (qs[(ib32 + 1) * 4 + 2 * l] as usize)
+                    | (((qh[ib32 + 1] as u16) << (8 - 2 * l) & 0x100) as usize);
+                let g2 = (qs[(ib32 + 1) * 4 + 2 * l + 1] as usize)
+                    | (((qh[ib32 + 1] as u16) << (7 - 2 * l) & 0x100) as usize);
+                let grid1 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3S_GRID.as_ptr() as *const u8).add(g1),
+                        4,
+                    )
+                };
+                let grid2 = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ3S_GRID.as_ptr() as *const u8).add(g2),
+                        4,
+                    )
+                };
+                let s_byte = signs[(ib32 + 1) * 4 + l];
+                for j in 0..4 {
+                    let s1 = if s_byte & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    let s2 = if s_byte & KMASK_IQ2XS[j + 4] != 0 { -1.0 } else { 1.0 };
+                    out.push(db2 * (grid1[j] as f32) * s1);
+                    out.push(db2 * (grid2[j] as f32) * s2);
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ1_S (256 elements/block) --------------------------------------------
+
+/// IQ1_S block layout: 2 d (f16), 16 qh, 8 qs_padding + 64 qs = ~66 bytes / 256 elements.
+/// Actually: 2 d + 16 qh + 8 padding/qs_low = 26 bytes plus 32 bytes more
+/// (qs in 8 groups of 4 bytes for 256 elements). Final block = 50 bytes.
+#[inline]
+fn dequant_iq1_s(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 50; // 2 d + 16 qh + 32 qs
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qh_bytes = &blk[2..18];
+        let qh: &[u16] = unsafe {
+            std::slice::from_raw_parts(qh_bytes.as_ptr() as *const u16, 8)
+        };
+        let qs = &blk[18..50];
+        for ib in 0..8 {
+            let dl = d * (2.0 * ((qh[ib] >> 12) & 7) as f32 + 1.0);
+            let delta = if qh[ib] & 0x8000 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            for l in 0..4 {
+                let grid_idx = (qs[ib * 4 + l] as usize) | (((qh[ib] >> (3 * l)) & 7) << 8) as usize;
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ1S_GRID.as_ptr() as *const i8).add(grid_idx),
+                        8,
+                    )
+                };
+                for j in 0..8 {
+                    out.push(dl * (grid[j] as f32 + delta));
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- TQ1_0 (256 elements/block) --------------------------------------------
+
+/// TQ1_0: ternary quantization with delta steps of 1/3. Block layout:
+/// 2 d (f16), 32 qs (each u8 * 3^shift → 0..1..2 in steps), 4 qh (high groups).
+/// Total block = 38 bytes / 256 elements.
+#[inline]
+fn dequant_tq1_0(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 38; // 2 d + 32 qs + 4 qh
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    let pow3: [u8; 5] = [1, 3, 9, 27, 81];
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..34];
+        let qh = &blk[34..38];
+        // First 32 bytes of qs: 5 ternary expansions × 32 elements = 160 elements
+        for j in 0..32 {
+            for n in 0..5 {
+                let q = qs[j].wrapping_mul(pow3[n]);
+                let xi = ((q as u16).wrapping_mul(3) >> 8) as i16;
+                out.push((xi as f32 - 1.0) * d);
+            }
+        }
+        // Last 4 bytes of qh: 4 ternary expansions × 4 elements = 16 elements
+        for n in 0..4 {
+            for j in 0..4 {
+                let q = qh[j].wrapping_mul(pow3[n]);
+                let xi = ((q as u16).wrapping_mul(3) >> 8) as i16;
+                out.push((xi as f32 - 1.0) * d);
+            }
+        }
+        // Remaining elements: any leftover (none for full blocks)
+        let _ = qs;
+    }
+    out
+}
+
+// -- TQ2_0 (256 elements/block) --------------------------------------------
+
+/// TQ2_0: 2-bit ternary (values -1, 0, 1). Block layout:
+/// 2 d (f16), 64 qs (each byte holds 4 × 2-bit quants) = 66 bytes / 256 elements.
+#[inline]
+fn dequant_tq2_0(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 66; // 2 d + 64 qs
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..66];
+        for j in 0..64 {
+            for l in 0..4 {
+                let q = ((qs[j] >> (l * 2)) & 3) as i8;
+                out.push((q as f32 - 1.0) * d);
+            }
+        }
+    }
+    out
 }

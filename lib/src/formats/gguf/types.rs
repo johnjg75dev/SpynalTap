@@ -213,6 +213,15 @@ impl GgmlType {
             Self::Q8K => 292,
             Self::Q2K => 82,  // 256/16 * (2+2+2+16) = 82
             Self::Q3K => 110, // 256/16 * (2+1+16) + 4 = 110
+            Self::Iq1S => 50,
+            Self::Iq2Xxs => 66,
+            Self::Iq2Xs => 74,
+            Self::Iq3Xxs => 98,
+            Self::Iq3S => 110,
+            Self::Iq4Nl => 18,
+            Self::Iq4Xs => 136,
+            Self::Tq1_0 => 38,
+            Self::Tq2_0 => 66,
             _ => return None,
         })
     }
@@ -225,6 +234,10 @@ impl GgmlType {
                 | Self::F16
                 | Self::Bf16
                 | Self::F64
+                | Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
                 | Self::Q4_0
                 | Self::Q4_1
                 | Self::Q5_0
@@ -237,6 +250,15 @@ impl GgmlType {
                 | Self::Q8K
                 | Self::Q2K
                 | Self::Q3K
+                | Self::Iq1S
+                | Self::Iq2Xxs
+                | Self::Iq2Xs
+                | Self::Iq3Xxs
+                | Self::Iq3S
+                | Self::Iq4Nl
+                | Self::Iq4Xs
+                | Self::Tq1_0
+                | Self::Tq2_0
         )
     }
 
