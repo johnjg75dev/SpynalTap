@@ -4,7 +4,7 @@
 //! With `--prune` and `--out`: analyze, prompt to confirm, then prune + write.
 //! With `--svd` and `--out`: SVD-compress the requested layers/tensors, then write.
 
-use clap::Parser;
+use clap::{Args, Parser};
 use spynaltap::analysis::score::BlockRole;
 use spynaltap::formats::gguf::GgufFile;
 use spynaltap::formats::gguf::types::GgmlType;
@@ -25,11 +25,40 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
-#[command(name = "spynaltape", version, about = "Analyze, prune, and SVD-compress AI model files", long_about = None)]
+#[command(
+    name = "spynaltape",
+    version,
+    about = "Analyze, prune, SVD-compress, merge, and quantize AI model files",
+    long_about = "spynaltape — these go to eleven.\n\n\
+                  Default: open, analyze, print a recommendation, exit.\n\
+                  Pass --prune, --svd, --quantize, or --merge to apply a transformation."
+)]
 struct Cli {
     /// Path to the model file (GGUF or safetensors).
     model: PathBuf,
 
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+
+    #[command(flatten)]
+    pruning: PruningArgs,
+
+    #[command(flatten)]
+    svd: SvdArgs,
+
+    #[command(flatten)]
+    merging: MergingArgs,
+
+    #[command(flatten)]
+    quantize: QuantizeArgs,
+
+    #[command(flatten)]
+    io: IoArgs,
+}
+
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "Analysis")]
+struct AnalysisArgs {
     /// List every tensor in the model.
     #[arg(long)]
     list: bool,
@@ -46,23 +75,26 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Write an HTML report (with embedded SVG charts) to this path.
+    #[arg(long, value_name = "PATH")]
+    report_html: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "Pruning")]
+struct PruningArgs {
     /// Prune per SELECTION (see grammar in the docs).
     #[arg(long)]
     prune: Option<String>,
 
-    /// Output file path (required for --prune / --svd).
-    #[arg(long)]
-    out: Option<PathBuf>,
-
     /// Re-open the pruned file and verify its structural integrity.
     #[arg(long)]
     verify: bool,
+}
 
-    /// Skip the y/N confirmation prompt.
-    #[arg(long, short = 'y')]
-    yes: bool,
-
-    // ---- SVD compression options -----------------------------------------
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "SVD")]
+struct SvdArgs {
     /// SVD-compress the model. Value is the layer-selection grammar:
     ///   all | all-attn | all-ffn | all-mlp | 0,1,2 | 0-5,10 | regex:^blk\.0\.
     /// Requires --out.
@@ -82,6 +114,7 @@ struct Cli {
     svd_rank: String,
 
     /// Output dtype for the packed (A, B) factors: f32 | f16 | bf16
+    ///   (use 'auto' to quantize output to Q8_0 when source is quantized, else F16)
     /// (default: f16)
     #[arg(long, default_value = "f16")]
     svd_dtype: String,
@@ -111,12 +144,57 @@ struct Cli {
     #[arg(long, default_value = ".svd_b")]
     svd_suffix_b: String,
 
-    // ---- Quantize options -----------------------------------------------
+    /// Adjacent tensors to also SVD-compress. Comma-separated role+offset selectors.
+    /// Example: 'attn_v+1,ffn_up-2'
+    #[arg(long)]
+    svd_adjacent: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "Merging")]
+struct MergingArgs {
+    /// Merge two model files into one (requires --model-b).
+    ///   average | slerp:<t> | moe:<strategy>:<k>
+    #[arg(long, value_name = "MODE")]
+    merge: Option<String>,
+
+    /// Second model file for --merge.
+    #[arg(long, value_name = "PATH")]
+    model_b: Option<PathBuf>,
+
+    /// Interpolation weight t for --merge slerp:t (0 = full A, 1 = full B).
+    #[arg(long, default_value_t = 0.5, value_name = "FLOAT")]
+    slerp_t: f32,
+
+    /// MoE merge strategy: 'average' | 'similarity' (requires --merge moe:...)
+    #[arg(long, default_value = "average", value_name = "STRAT")]
+    moe_strategy: String,
+
+    /// MoE top-k experts to keep when strategy=similarity.
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    moe_top_k: usize,
+}
+
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "Quantize")]
+struct QuantizeArgs {
     /// Quantize every tensor in the model to this GGML block type:
     ///   q2_k | q3_k | q4_0 | q4_1 | q4_k | q5_0 | q5_1 | q5_k | q6_k | q8_0 | q8_1 | q8_k
     /// (GGUF only in the first cut.) Requires --out.
     #[arg(long)]
     quantize: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+#[command(next_help_heading = "I/O")]
+struct IoArgs {
+    /// Output file path (required for --prune / --svd / --quantize / --merge).
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Skip the y/N confirmation prompt.
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 fn main() -> ExitCode {
@@ -147,36 +225,37 @@ fn run(cli: Cli) -> Result<(), Error> {
 fn run_gguf(cli: Cli) -> Result<(), Error> {
     let gg = GgufFile::open(&cli.model)?;
 
-    if cli.list {
-        print_tensor_list(&gg, cli.json);
+    if cli.analysis.list {
+        print_tensor_list(&gg, cli.analysis.json);
         return Ok(());
     }
 
-    if cli.sample == 0 {
+    if cli.analysis.sample == 0 {
         return Err(Error::Gguf("--sample must be > 0".into()));
     }
 
-    let analysis = Analyzer::with_sample_per_tensor(cli.sample).analyze(&gg)?;
-    print_human_report(&gg, &analysis, cli.json);
+    let analysis = Analyzer::with_sample_per_tensor(cli.analysis.sample).analyze(&gg)?;
+    print_human_report(&gg, &analysis, cli.analysis.json);
 
-    if let Some(sel_str) = &cli.prune {
+    if let Some(sel_str) = &cli.pruning.prune {
         let selection = parse_selection(sel_str)?;
         let out_path = cli
+            .io
             .out
             .as_ref()
             .ok_or_else(|| Error::Gguf("--prune requires --out".into()))?
             .clone();
-        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.yes)?;
+        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.io.yes)?;
         let plan = build_plan(&gg, &selection, Some(&analysis.blocks))?;
         print_plan_summary(&plan);
         let report = apply_to_gguf(&gg, &plan, &out_path)?;
         println!("\n=== prune report ===");
-        if cli.json {
+        if cli.analysis.json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_prune_report(&report);
         }
-        if cli.verify {
+        if cli.pruning.verify {
             use spynaltap::formats::gguf::verify;
             let kept: Vec<String> = plan
                 .keep
@@ -206,8 +285,9 @@ fn run_gguf(cli: Cli) -> Result<(), Error> {
         }
     }
 
-    if let Some(layer_sel) = &cli.svd {
+    if let Some(layer_sel) = &cli.svd.svd {
         let out_path = cli
+            .io
             .out
             .as_ref()
             .ok_or_else(|| Error::Gguf("--svd requires --out".into()))?
@@ -216,27 +296,28 @@ fn run_gguf(cli: Cli) -> Result<(), Error> {
         print_svd_config_summary(&cfg);
         let plan = build_svd_plan(&gg, &cfg)?;
         print_svd_plan_summary(&plan);
-        confirm_or_exit_svd(&out_path, &plan, cli.yes)?;
+        confirm_or_exit_svd(&out_path, &plan, cli.io.yes)?;
         let report = svd_apply_gguf(&gg, &plan, &out_path)?;
         println!("\n=== SVD report ===");
-        if cli.json {
+        if cli.analysis.json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_svd_report(&report);
         }
     }
 
-    if let Some(q_str) = &cli.quantize {
+    if let Some(q_str) = &cli.quantize.quantize {
         let out_path = cli
+            .io
             .out
             .as_ref()
             .ok_or_else(|| Error::Gguf("--quantize requires --out".into()))?
             .clone();
         let target = parse_quant_type(q_str)?;
-        confirm_or_exit_quantize(&cli.model, target, &out_path, cli.yes)?;
+        confirm_or_exit_quantize(&cli.model, target, &out_path, cli.io.yes)?;
         let report = quantize_gguf_apply(&cli.model, target, &out_path)?;
         println!("\n=== quantize report ===");
-        if cli.json {
+        if cli.analysis.json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_quantize_report(&report);
@@ -248,39 +329,41 @@ fn run_gguf(cli: Cli) -> Result<(), Error> {
 fn run_safetensors(cli: Cli) -> Result<(), Error> {
     let st = SafetensorsFile::open(&cli.model)?;
 
-    if cli.list {
-        print_tensor_list(&st, cli.json);
+    if cli.analysis.list {
+        print_tensor_list(&st, cli.analysis.json);
         return Ok(());
     }
 
-    if cli.sample == 0 {
+    if cli.analysis.sample == 0 {
         return Err(Error::Safetensors("--sample must be > 0".into()));
     }
 
-    let analysis = Analyzer::with_sample_per_tensor(cli.sample).analyze(&st)?;
-    print_human_report(&st, &analysis, cli.json);
+    let analysis = Analyzer::with_sample_per_tensor(cli.analysis.sample).analyze(&st)?;
+    print_human_report(&st, &analysis, cli.analysis.json);
 
-    if let Some(sel_str) = &cli.prune {
+    if let Some(sel_str) = &cli.pruning.prune {
         let selection = parse_selection(sel_str)?;
         let out_path = cli
+            .io
             .out
             .as_ref()
             .ok_or_else(|| Error::Safetensors("--prune requires --out".into()))?
             .clone();
-        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.yes)?;
+        confirm_or_exit_prune(&out_path, &selection, &analysis.recommendation, cli.io.yes)?;
         let plan = build_plan(&st, &selection, Some(&analysis.blocks))?;
         print_plan_summary(&plan);
         let report = apply_to_safetensors(&st, &plan, &out_path)?;
         println!("\n=== prune report ===");
-        if cli.json {
+        if cli.analysis.json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_prune_report(&report);
         }
     }
 
-    if let Some(layer_sel) = &cli.svd {
+    if let Some(layer_sel) = &cli.svd.svd {
         let out_path = cli
+            .io
             .out
             .as_ref()
             .ok_or_else(|| Error::Safetensors("--svd requires --out".into()))?
@@ -289,10 +372,10 @@ fn run_safetensors(cli: Cli) -> Result<(), Error> {
         print_svd_config_summary(&cfg);
         let plan = build_svd_plan(&st, &cfg)?;
         print_svd_plan_summary(&plan);
-        confirm_or_exit_svd(&out_path, &plan, cli.yes)?;
+        confirm_or_exit_svd(&out_path, &plan, cli.io.yes)?;
         let report = svd_apply_st(&st, &plan, &out_path)?;
         println!("\n=== SVD report ===");
-        if cli.json {
+        if cli.analysis.json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
             print_svd_report(&report);
@@ -306,24 +389,24 @@ fn run_safetensors(cli: Cli) -> Result<(), Error> {
 fn build_svd_config(cli: &Cli, layer_sel: &str) -> Result<SvdConfig, Error> {
     let layers =
         LayerSelection::parse(layer_sel).map_err(|e| Error::Gguf(format!("--svd: {e}")))?;
-    let tensors = TensorSelection::parse(&cli.svd_tensors)
+    let tensors = TensorSelection::parse(&cli.svd.svd_tensors)
         .map_err(|e| Error::Gguf(format!("--svd-tensors: {e}")))?;
-    let rank = RankSpecWithClamps::parse(&cli.svd_rank)
+    let rank = RankSpecWithClamps::parse(&cli.svd.svd_rank)
         .map_err(|e| Error::Gguf(format!("--svd-rank: {e}")))?;
-    let dtype =
-        OutputDtype::parse(&cli.svd_dtype).map_err(|e| Error::Gguf(format!("--svd-dtype: {e}")))?;
+    let dtype = OutputDtype::parse(&cli.svd.svd_dtype)
+        .map_err(|e| Error::Gguf(format!("--svd-dtype: {e}")))?;
     Ok(SvdConfig {
         layers,
         tensors,
         rank,
         dtype,
-        min_dim: cli.svd_min_dim,
-        randomized: cli.svd_randomized_min > 0,
-        randomized_oversample: cli.svd_oversample,
-        randomized_power_iters: cli.svd_power_iters,
-        randomized_min_elems: cli.svd_randomized_min,
-        suffix_a: cli.svd_suffix_a.clone(),
-        suffix_b: cli.svd_suffix_b.clone(),
+        min_dim: cli.svd.svd_min_dim,
+        randomized: cli.svd.svd_randomized_min > 0,
+        randomized_oversample: cli.svd.svd_oversample,
+        randomized_power_iters: cli.svd.svd_power_iters,
+        randomized_min_elems: cli.svd.svd_randomized_min,
+        suffix_a: cli.svd.svd_suffix_a.clone(),
+        suffix_b: cli.svd.svd_suffix_b.clone(),
         per_layer: std::collections::BTreeMap::new(),
         per_tensor: Vec::new(),
         adjacent: None,
