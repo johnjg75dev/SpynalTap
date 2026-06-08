@@ -110,6 +110,9 @@ impl Analyzer {
             sample_per_tensor: sample,
             total_tensors: tensors.len(),
             total_bytes,
+            model_name: model.name().map(|s| s.to_string()),
+            architecture: model.architecture().map(|s| s.to_string()),
+            file_size: Some(total_bytes),
         })
     }
 }

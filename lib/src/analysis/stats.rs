@@ -71,6 +71,14 @@ pub struct Analysis {
     pub sample_per_tensor: usize,
     pub total_tensors: usize,
     pub total_bytes: u64,
+
+    // Model metadata (carried through from the source file)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
 }
 
 #[inline]

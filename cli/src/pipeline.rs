@@ -592,7 +592,7 @@ fn execute_pipeline(cfg: &PipelineConfig) -> Result<(), crate::Error> {
                 let m = model.as_ref()
                     .ok_or_else(|| crate::Error::Gguf("pipeline: no model set for analyze step".into()))?;
                 run_analyze(m, sample.unwrap_or(200_000), json.unwrap_or(false),
-                    report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v))?;
+                    report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v), false)?;
             }
             PipelineStep::Quant { quant_type, out, verify } => {
                 let m = model.as_ref()

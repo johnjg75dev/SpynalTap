@@ -453,6 +453,9 @@ mod tests {
             sample_per_tensor: 200_000,
             total_tensors: 2,
             total_bytes: 1280,
+            model_name: None,
+            architecture: None,
+            file_size: None,
         }
     }
 
@@ -559,6 +562,9 @@ mod tests {
             sample_per_tensor: 100,
             total_tensors: 2,
             total_bytes: 64,
+            model_name: None,
+            architecture: None,
+            file_size: None,
         };
         let charts = analysis_to_charts(&a);
         let titles: Vec<&str> = charts.iter().map(|c| c.title.as_str()).collect();

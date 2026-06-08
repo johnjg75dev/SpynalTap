@@ -74,6 +74,10 @@ enum Commands {
         /// Path to HTML template file (optional, uses built-in if not provided)
         #[arg(long, value_name = "PATH")]
         template: Option<PathBuf>,
+
+        /// Dry run: analyze and print results without writing any outputs
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Prune specified blocks/layers from a model
@@ -256,8 +260,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
-        Commands::Analyze { model, sample, json, report, template } => {
-            run_analyze(&model, sample, json, report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v))
+        Commands::Analyze { model, sample, json, report, template, dry_run } => {
+            run_analyze(&model, sample, json, report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v), dry_run)
         }
         Commands::Prune { model, selection, out, verify, yes } => {
             run_prune(&model, &selection, &out, verify, yes)
@@ -289,9 +293,13 @@ fn run(cli: Cli) -> Result<(), Error> {
     }
 }
 
-pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Path>, template_path: Option<&Path>) -> Result<(), Error> {
+pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Path>, template_path: Option<&Path>, dry_run: bool) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     eprintln!("[open] {} (format: {})", model.display(), format.as_str());
+
+    if dry_run {
+        eprintln!("[dry-run] analyze only — no files will be written");
+    }
 
     match format {
         ModelFormat::Gguf => {
@@ -303,8 +311,15 @@ pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: 
                 print_human_report(&gg, &analysis);
             }
             if let Some(path) = report_path {
-                write_html_report(&analysis, path, template_path)?;
-                eprintln!("[report] wrote {}", path.display());
+                if dry_run {
+                    eprintln!("[dry-run] would write report to {}", path.display());
+                } else {
+                    write_html_report(&analysis, path, template_path)?;
+                    eprintln!("[report] wrote {}", path.display());
+                }
+            }
+            if dry_run {
+                print_dry_run_analysis(&analysis);
             }
         }
         ModelFormat::Safetensors => {
@@ -316,8 +331,15 @@ pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: 
                 print_human_report(&st, &analysis);
             }
             if let Some(path) = report_path {
-                write_html_report(&analysis, path, template_path)?;
-                eprintln!("[report] wrote {}", path.display());
+                if dry_run {
+                    eprintln!("[dry-run] would write report to {}", path.display());
+                } else {
+                    write_html_report(&analysis, path, template_path)?;
+                    eprintln!("[report] wrote {}", path.display());
+                }
+            }
+            if dry_run {
+                print_dry_run_analysis(&analysis);
             }
         }
     }
@@ -734,7 +756,7 @@ fn run_pipeline(config_path: &Path) -> Result<(), Error> {
         match step {
             PipelineStep::Analyze { sample, json, report, template } => {
                 let m = model.as_ref().ok_or_else(|| Error::Gguf("pipeline: no model set for analyze step".into()))?;
-                run_analyze(m, sample.unwrap_or(200_000), json.unwrap_or(false), report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v))?;
+                run_analyze(m, sample.unwrap_or(200_000), json.unwrap_or(false), report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v), false)?;
             }
             PipelineStep::Quant { quant_type, out, verify } => {
                 let m = model.as_ref().ok_or_else(|| Error::Gguf("pipeline: no model set for quant step".into()))?;
@@ -856,6 +878,39 @@ fn verify_gguf(path: &Path, plan: &spynaltap::PrunePlan) -> Result<(), Error> {
     Ok(())
 }
 
+fn print_dry_run_analysis(analysis: &spynaltap::Analysis) {
+    println!("\n=== DRY RUN: Expected Impact ===");
+    let total_mb = analysis.total_bytes as f64 / 1_048_576.0;
+    println!("  model size:    {:.2} MB", total_mb);
+
+    if analysis.recommendation_count > 0 {
+        let prune_mb = (analysis.total_bytes - analysis.estimated_bytes_after_prune) as f64 / 1_048_576.0;
+        let after_mb = analysis.estimated_bytes_after_prune as f64 / 1_048_576.0;
+        println!("  prune:         {} blocks recommended", analysis.recommendation_count);
+        println!("  savings:       {:.2} MB ({:.1}% reduction)", prune_mb, prune_mb / total_mb * 100.0);
+        println!("  estimated:     {:.2} MB after prune", after_mb);
+        let scores: Vec<String> = analysis.blocks.iter()
+            .filter(|b| b.removable > 0.5)
+            .map(|b| format!("{} ({:.2})", b.label, b.removable))
+            .collect();
+        println!("  candidates:    {}", scores.join(", "));
+    } else {
+        println!("  prune:         no blocks recommended for pruning");
+    }
+
+    let total_tensors: usize = analysis.blocks.iter().map(|b| b.tensors.len()).sum();
+    println!("  tensors:       {} total", total_tensors);
+    println!("  blocks:        {} total", analysis.blocks.len());
+
+    // Show spectra availability
+    let spec_count: usize = analysis.blocks.iter().map(|b| b.spectra.len()).sum();
+    if spec_count > 0 {
+        println!("  spectra:       {} tensors have SVD data available", spec_count);
+    }
+
+    println!("\n  No files were written (--dry-run).");
+}
+
 fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
     match s.to_ascii_lowercase().as_str() {
         "q2_k" => Ok(GgmlType::Q2K),
@@ -887,14 +942,9 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
     }
 }
 
-fn write_html_report(analysis: &spynaltap::Analysis, path: &Path, _template_path: Option<&Path>) -> Result<(), Error> {
-    // TODO: load template, fill in data from analysis, write HTML
-    // For now, write a minimal placeholder
-    let html = format!(
-        r#"<!DOCTYPE html><html><head><title>SpynalTap Report</title></head><body><h1>Analysis Report</h1><p>Blocks: {}</p><p>Recommendation: {:?}</p></body></html>"#,
-        analysis.blocks.len(),
-        analysis.recommendation
-    );
+fn write_html_report(analysis: &spynaltap::Analysis, path: &Path, template_path: Option<&Path>) -> Result<(), Error> {
+    let html = spynaltap::render_html_report(analysis, template_path)
+        .map_err(|e| Error::Gguf(format!("report generation failed: {e}")))?;
     std::fs::write(path, html).map_err(Error::Io)?;
     Ok(())
 }
