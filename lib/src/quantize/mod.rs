@@ -17,7 +17,9 @@
 //! constraints of the canonical layout are satisfied trivially.
 
 pub mod apply;
+pub mod iq1_m;
 pub mod iq1_s;
+pub mod iq2_s;
 pub mod iq2_xs;
 pub mod iq2_xxs;
 pub mod iq3_s;
@@ -92,12 +94,14 @@ fn dispatch_quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
         GgmlType::Q8_0 => q8_0::quantize(src),
         GgmlType::Q8_1 => q8_1::quantize(src),
         GgmlType::Q8K => q8_k::quantize(src),
+        GgmlType::Iq2S => iq2_s::quantize(src),
         GgmlType::Iq2Xs => iq2_xs::quantize(src),
         GgmlType::Iq2Xxs => iq2_xxs::quantize(src),
         GgmlType::Iq3Xxs => iq3_xxs::quantize(src),
         GgmlType::Iq3S => iq3_s::quantize(src),
         GgmlType::Iq4Nl => iq4_nl::quantize(src),
         GgmlType::Iq4Xs => iq4_xs::quantize(src),
+        GgmlType::Iq1M => iq1_m::quantize(src),
         GgmlType::Iq1S => iq1_s::quantize(src),
         GgmlType::Tq1_0 => tq1_0::quantize(src),
         GgmlType::Tq2_0 => tq2_0::quantize(src),
@@ -121,12 +125,14 @@ pub fn is_quantizable(ty: GgmlType) -> bool {
             | GgmlType::Q8_0
             | GgmlType::Q8_1
             | GgmlType::Q8K
+            | GgmlType::Iq2S
             | GgmlType::Iq2Xs
             | GgmlType::Iq2Xxs
             | GgmlType::Iq3Xxs
             | GgmlType::Iq3S
             | GgmlType::Iq4Nl
             | GgmlType::Iq4Xs
+            | GgmlType::Iq1M
             | GgmlType::Iq1S
             | GgmlType::Tq1_0
             | GgmlType::Tq2_0
@@ -158,12 +164,14 @@ pub fn quantize_par(src: &[f32], ty: GgmlType) -> Vec<u8> {
         GgmlType::Q8_0 => chunks.par_iter().map(|c| q8_0::quantize(c)).collect(),
         GgmlType::Q8_1 => chunks.par_iter().map(|c| q8_1::quantize(c)).collect(),
         GgmlType::Q8K => chunks.par_iter().map(|c| q8_k::quantize(c)).collect(),
+        GgmlType::Iq2S => chunks.par_iter().map(|c| iq2_s::quantize(c)).collect(),
         GgmlType::Iq2Xs => chunks.par_iter().map(|c| iq2_xs::quantize(c)).collect(),
         GgmlType::Iq2Xxs => chunks.par_iter().map(|c| iq2_xxs::quantize(c)).collect(),
         GgmlType::Iq3Xxs => chunks.par_iter().map(|c| iq3_xxs::quantize(c)).collect(),
         GgmlType::Iq3S => chunks.par_iter().map(|c| iq3_s::quantize(c)).collect(),
         GgmlType::Iq4Nl => chunks.par_iter().map(|c| iq4_nl::quantize(c)).collect(),
         GgmlType::Iq4Xs => chunks.par_iter().map(|c| iq4_xs::quantize(c)).collect(),
+        GgmlType::Iq1M => chunks.par_iter().map(|c| iq1_m::quantize(c)).collect(),
         GgmlType::Iq1S => chunks.par_iter().map(|c| iq1_s::quantize(c)).collect(),
         GgmlType::Tq1_0 => chunks.par_iter().map(|c| tq1_0::quantize(c)).collect(),
         GgmlType::Tq2_0 => chunks.par_iter().map(|c| tq2_0::quantize(c)).collect(),

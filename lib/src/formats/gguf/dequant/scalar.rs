@@ -7,7 +7,7 @@
 //! For multi-block types the parallel entry point `dequantize_par` splits
 //! input bytes into per-block chunks and processes them in parallel via rayon.
 
-use super::lookup::{IQ1S_DELTA, IQ1S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
+use super::lookup::{IQ1S_DELTA, IQ1S_GRID, IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
 use super::truncate_to;
 use crate::formats::gguf::types::GgmlType;
 
@@ -32,6 +32,8 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], max: usize) -> Option<Vec<f32>> {
             GgmlType::Iq1S => dequant_iq1_s(bytes),
             GgmlType::Iq2Xxs => dequant_iq2_xxs(bytes),
             GgmlType::Iq2Xs => dequant_iq2_xs(bytes),
+            GgmlType::Iq2S => dequant_iq2_s(bytes),
+            GgmlType::Iq1M => dequant_iq1_m(bytes),
             GgmlType::Iq3Xxs => dequant_iq3_xxs(bytes),
             GgmlType::Iq3S => dequant_iq3_s(bytes),
             GgmlType::Iq4Nl => dequant_iq4_nl(bytes),
@@ -789,6 +791,119 @@ pub fn dequant_iq1_s(bytes: &[u8]) -> Vec<f32> {
                 let grid = unsafe {
                     std::slice::from_raw_parts(
                         (IQ1S_GRID.as_ptr() as *const i8).add(grid_idx),
+                        8,
+                    )
+                };
+                for j in 0..8 {
+                    out.push(dl * (grid[j] as f32 + delta));
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ2_S (256 elements/block) --------------------------------------------
+
+/// IQ2_S block layout: 82 bytes / 256 elements
+///   d[2] + qs[64] + qh[8] + scales[8]
+/// qs stores grid indices packed as pairs: low_byte | (high_byte << 8) & 0x3ff
+/// qh stores sign bits (1 byte per 8-element sub-group)
+/// scales stores 2 × 4-bit per-sub-block scales
+#[inline]
+pub fn dequant_iq2_s(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 82;
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..66];
+        let qh = &blk[66..74];
+        let scales = &blk[74..82];
+        for ib32 in 0..8 {
+            let db0 = d * (0.5 + (scales[ib32] & 0x0f) as f32) * 0.25;
+            let db1 = d * (0.5 + (scales[ib32] >> 4) as f32) * 0.25;
+            for l in 0..4 {
+                let dl = if l < 2 { db0 } else { db1 };
+                let idx = (qs[ib32 * 4 + l] as u16)
+                    | ((qh[ib32] as u16) << (8 - 2 * l) & 0x300);
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ2S_GRID.as_ptr() as *const u8).add(idx as usize),
+                        8,
+                    )
+                };
+                let signs_byte = qs[32 + ib32 * 4 + l];
+                for j in 0..8 {
+                    let sgn = if signs_byte & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
+                    out.push(dl * grid[j] as f32 * sgn);
+                }
+            }
+        }
+    }
+    out
+}
+
+// -- IQ1_M (256 elements/block) --------------------------------------------
+
+/// IQ1_M block layout: 56 bytes / 256 elements (NO separate d field)
+///   qs[32] + qh[16] + scales[8]
+/// d is packed as a 12-bit FP16 spread across the high bits of 4 u16 in scales[0..8]
+/// scale unpack: (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000)
+/// Uses the same IQ1S_GRID as IQ1_S (reuses 2048-entry codebook).
+#[inline]
+pub fn dequant_iq1_m(bytes: &[u8]) -> Vec<f32> {
+    const BLOCK_SIZE: usize = 56;
+    let n_blocks = bytes.len() / BLOCK_SIZE;
+    let mut out = Vec::with_capacity(n_blocks * QK_K);
+    for blk in bytes.chunks_exact(BLOCK_SIZE) {
+        let qs = &blk[0..32];
+        let qh = &blk[32..48];
+        let scales_bytes = &blk[48..56];
+        let sc_u16 = unsafe {
+            std::slice::from_raw_parts(scales_bytes.as_ptr() as *const u16, 4)
+        };
+        let d_bits = (sc_u16[0] >> 12)
+            | ((sc_u16[1] >> 8) & 0x00f0)
+            | ((sc_u16[2] >> 4) & 0x0f00)
+            | (sc_u16[3] & 0xf000);
+        let d = f16_to_f32(d_bits);
+        for ib in 0..8 {
+            let dl1 = d * (2.0 * ((sc_u16[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) as f32 + 1.0);
+            let dl2 = d * (2.0 * ((sc_u16[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) as f32 + 1.0);
+            let idx0 = qs[ib * 4 + 0] as u16 | ((qh[ib * 2 + 0] as u16) << 8) & 0x700;
+            let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2 + 0] as u16) << 4) & 0x700;
+            let idx2 = qs[ib * 4 + 2] as u16 | ((qh[ib * 2 + 1] as u16) << 8) & 0x700;
+            let idx3 = qs[ib * 4 + 3] as u16 | ((qh[ib * 2 + 1] as u16) << 4) & 0x700;
+            let delta0 = if qh[ib * 2 + 0] & 0x08 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            let delta1 = if qh[ib * 2 + 0] & 0x80 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            let delta2 = if qh[ib * 2 + 1] & 0x08 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            let delta3 = if qh[ib * 2 + 1] & 0x80 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            for l in 0..2 {
+                let (idx, delta, dl) = if l == 0 {
+                    (idx0, delta0, dl1)
+                } else {
+                    (idx1, delta1, dl1)
+                };
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ1S_GRID.as_ptr() as *const i8).add(idx as usize),
+                        8,
+                    )
+                };
+                for j in 0..8 {
+                    out.push(dl * (grid[j] as f32 + delta));
+                }
+            }
+            for l in 2..4 {
+                let (idx, delta, dl) = if l == 2 {
+                    (idx2, delta2, dl2)
+                } else {
+                    (idx3, delta3, dl2)
+                };
+                let grid = unsafe {
+                    std::slice::from_raw_parts(
+                        (IQ1S_GRID.as_ptr() as *const i8).add(idx as usize),
                         8,
                     )
                 };

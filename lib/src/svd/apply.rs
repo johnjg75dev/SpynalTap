@@ -598,6 +598,8 @@ fn tensordtype_to_ggml(t: TensorDtype) -> GgmlType {
         TensorDtype::Iq4Nl => GgmlType::Iq4Nl,
         TensorDtype::Iq4Xs => GgmlType::Iq4Xs,
         TensorDtype::Iq1S => GgmlType::Iq1S,
+        TensorDtype::Iq2S => GgmlType::Iq2S,
+        TensorDtype::Iq1M => GgmlType::Iq1M,
         TensorDtype::Tq1_0 => GgmlType::Tq1_0,
         TensorDtype::Tq2_0 => GgmlType::Tq2_0,
         TensorDtype::Unknown(_) => GgmlType::F16,

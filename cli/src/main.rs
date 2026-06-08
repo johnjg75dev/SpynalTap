@@ -11,6 +11,8 @@
 //! - `bench` — benchmark operations
 //! - `test` — run self-tests
 
+mod pipeline;
+
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use spynaltap::formats::gguf::dequant as gguf_dequant;
@@ -206,6 +208,12 @@ enum Commands {
         yes: bool,
     },
 
+    /// Run a pipeline of operations defined in a JSON config file
+    Pipeline {
+        /// Path to the JSON pipeline definition
+        config: PathBuf,
+    },
+
     /// Benchmark operations
     Bench {
         /// Operation to benchmark (analyze, svd, quant)
@@ -259,6 +267,9 @@ fn run(cli: Cli) -> Result<(), Error> {
         }
         Commands::Moe { model, strategy, out, expert_pattern, yes } => {
             run_moe(&model, &strategy, &out, expert_pattern.as_deref(), yes)
+        }
+        Commands::Pipeline { config } => {
+            run_pipeline(&config)
         }
         Commands::Bench { op, model, iterations } => {
             run_bench(&op, model.as_ref().map(|v| &**v), iterations)
@@ -705,6 +716,33 @@ struct MergeConfig {
     weights: Option<Vec<f64>>,
 }
 
+fn run_pipeline(config_path: &Path) -> Result<(), Error> {
+    use pipeline::PipelineStep;
+    let cfg = pipeline::PipelineConfig::from_json(config_path)?;
+    let mut model = cfg.model;
+    for (i, step) in cfg.steps.iter().enumerate() {
+        eprintln!("[pipeline] step {}: {:?}", i + 1, step);
+        match step {
+            PipelineStep::Analyze { sample, json, report, template } => {
+                let m = model.as_ref().ok_or_else(|| Error::Gguf("pipeline: no model set for analyze step".into()))?;
+                run_analyze(m, sample.unwrap_or(200_000), json.unwrap_or(false), report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v))?;
+            }
+            PipelineStep::Quant { quant_type, out, verify } => {
+                let m = model.as_ref().ok_or_else(|| Error::Gguf("pipeline: no model set for quant step".into()))?;
+                run_quant(m, quant_type, out, "", verify.unwrap_or(false))?;
+                model = Some(out.clone());
+            }
+            PipelineStep::Prune { selection, out, verify } => {
+                let m = model.as_ref().ok_or_else(|| Error::Gguf("pipeline: no model set for prune step".into()))?;
+                run_prune(m, selection, out, verify.unwrap_or(false), true)?;
+                model = Some(out.clone());
+            }
+            _ => eprintln!("[pipeline] step {}: unsupported, skipping", i + 1),
+        }
+    }
+    Ok(())
+}
+
 fn run_bench(op: &str, _model: Option<&Path>, _iterations: usize) -> Result<(), Error> {
     eprintln!("[bench] op={} iterations={}", op, _iterations);
     // TODO: implement benchmarking
@@ -824,6 +862,8 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
         "q8_1" => Ok(GgmlType::Q8_1),
         "q8_k" => Ok(GgmlType::Q8K),
         "iq1_s" => Ok(GgmlType::Iq1S),
+        "iq1_m" => Ok(GgmlType::Iq1M),
+        "iq2_s" => Ok(GgmlType::Iq2S),
         "iq2_xxs" => Ok(GgmlType::Iq2Xxs),
         "iq2_xs" => Ok(GgmlType::Iq2Xs),
         "iq3_xxs" => Ok(GgmlType::Iq3Xxs),
@@ -833,7 +873,7 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
         "tq1_0" => Ok(GgmlType::Tq1_0),
         "tq2_0" => Ok(GgmlType::Tq2_0),
         other => Err(Error::Gguf(format!(
-            "unsupported quant type {:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k, iq1_s, iq2_xxs, iq2_xs, iq3_xxs, iq3_s, iq4_nl, iq4_xs, tq1_0, tq2_0)", other
+            "unsupported quant type {:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k, iq1_s, iq1_m, iq2_s, iq2_xxs, iq2_xs, iq3_xxs, iq3_s, iq4_nl, iq4_xs, tq1_0, tq2_0)", other
         ))),
     }
 }

@@ -28,15 +28,17 @@ pub enum GgmlType {
     Iq2Xxs = 16,
     Iq2Xs = 17,
     Iq3Xxs = 18,
-    Iq3S = 19,
+    Iq1S = 19,
     Iq4Nl = 20,
-    Iq4Xs = 21,
+    Iq3S = 21,
+    Iq2S = 22,
+    Iq4Xs = 23,
     I8 = 24,
     I16 = 25,
     I32 = 26,
     I64 = 27,
     F64 = 28,
-    Iq1S = 29,
+    Iq1M = 29,
     Bf16 = 30,
     Tq1_0 = 34,
     Tq2_0 = 35,
@@ -64,15 +66,17 @@ impl GgmlType {
             16 => Self::Iq2Xxs,
             17 => Self::Iq2Xs,
             18 => Self::Iq3Xxs,
-            19 => Self::Iq3S,
+            19 => Self::Iq1S,
             20 => Self::Iq4Nl,
-            21 => Self::Iq4Xs,
+            21 => Self::Iq3S,
+            22 => Self::Iq2S,
+            23 => Self::Iq4Xs,
             24 => Self::I8,
             25 => Self::I16,
             26 => Self::I32,
             27 => Self::I64,
             28 => Self::F64,
-            29 => Self::Iq1S,
+            29 => Self::Iq1M,
             30 => Self::Bf16,
             34 => Self::Tq1_0,
             35 => Self::Tq2_0,
@@ -106,10 +110,12 @@ impl GgmlType {
             Self::Iq2Xxs => TensorDtype::Iq2Xxs,
             Self::Iq2Xs => TensorDtype::Iq2Xs,
             Self::Iq3Xxs => TensorDtype::Iq3Xxs,
-            Self::Iq3S => TensorDtype::Iq3S,
-            Self::Iq4Nl => TensorDtype::Iq4Nl,
-            Self::Iq4Xs => TensorDtype::Iq4Xs,
             Self::Iq1S => TensorDtype::Iq1S,
+            Self::Iq4Nl => TensorDtype::Iq4Nl,
+            Self::Iq3S => TensorDtype::Iq3S,
+            Self::Iq2S => TensorDtype::Iq2S,
+            Self::Iq4Xs => TensorDtype::Iq4Xs,
+            Self::Iq1M => TensorDtype::Iq1M,
             Self::Tq1_0 => TensorDtype::Tq1_0,
             Self::Tq2_0 => TensorDtype::Tq2_0,
             Self::Unknown(v) => TensorDtype::Unknown(v),
@@ -142,10 +148,12 @@ impl GgmlType {
             Self::Iq2Xxs => "IQ2_XXS",
             Self::Iq2Xs => "IQ2_XS",
             Self::Iq3Xxs => "IQ3_XXS",
-            Self::Iq3S => "IQ3_S",
-            Self::Iq4Nl => "IQ4_NL",
-            Self::Iq4Xs => "IQ4_XS",
             Self::Iq1S => "IQ1_S",
+            Self::Iq4Nl => "IQ4_NL",
+            Self::Iq3S => "IQ3_S",
+            Self::Iq2S => "IQ2_S",
+            Self::Iq4Xs => "IQ4_XS",
+            Self::Iq1M => "IQ1_M",
             Self::Tq1_0 => "TQ1_0",
             Self::Tq2_0 => "TQ2_0",
             Self::Unknown(_) => "?",
@@ -180,11 +188,13 @@ impl GgmlType {
             | Self::Iq2Xxs
             | Self::Iq2Xs
             | Self::Iq3Xxs
+            | Self::Iq1S
             | Self::Iq3S
+            | Self::Iq2S
             | Self::Iq4Xs
+            | Self::Iq1M
             | Self::Tq1_0
-            | Self::Tq2_0
-            | Self::Iq1S => 256,
+            | Self::Tq2_0 => 256,
             Self::Unknown(_) => 1,
         }
     }
@@ -218,8 +228,10 @@ impl GgmlType {
             Self::Iq2Xs => 74,
             Self::Iq3Xxs => 98,
             Self::Iq3S => 110,
+            Self::Iq2S => 82,
             Self::Iq4Nl => 18,
             Self::Iq4Xs => 136,
+            Self::Iq1M => 56,
             Self::Tq1_0 => 38,
             Self::Tq2_0 => 66,
             _ => return None,
@@ -255,8 +267,10 @@ impl GgmlType {
                 | Self::Iq2Xs
                 | Self::Iq3Xxs
                 | Self::Iq3S
+                | Self::Iq2S
                 | Self::Iq4Nl
                 | Self::Iq4Xs
+                | Self::Iq1M
                 | Self::Tq1_0
                 | Self::Tq2_0
         )
@@ -283,15 +297,17 @@ impl GgmlType {
             Self::Iq2Xxs => 16,
             Self::Iq2Xs => 17,
             Self::Iq3Xxs => 18,
-            Self::Iq3S => 19,
+            Self::Iq1S => 19,
             Self::Iq4Nl => 20,
-            Self::Iq4Xs => 21,
+            Self::Iq3S => 21,
+            Self::Iq2S => 22,
+            Self::Iq4Xs => 23,
             Self::I8 => 24,
             Self::I16 => 25,
             Self::I32 => 26,
             Self::I64 => 27,
             Self::F64 => 28,
-            Self::Iq1S => 29,
+            Self::Iq1M => 29,
             Self::Bf16 => 30,
             Self::Tq1_0 => 34,
             Self::Tq2_0 => 35,
