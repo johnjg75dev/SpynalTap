@@ -8,6 +8,8 @@
 //! - `quant` — quantize model to specified GGML type
 //! - `merge` — merge N models (weighted average, slerp)
 //! - `moe` — auto-detect experts, merge or purge experts
+//! - `pipeline` — run a pipeline from a JSON config file
+//! - `interact` — interactive wizard to build and run a pipeline
 //! - `bench` — benchmark operations
 //! - `test` — run self-tests
 
@@ -214,6 +216,10 @@ enum Commands {
         config: PathBuf,
     },
 
+    /// Interactive wizard: build a pipeline step by step, save/load config,
+    /// then approve and execute
+    Interact,
+
     /// Benchmark operations
     Bench {
         /// Operation to benchmark (analyze, svd, quant)
@@ -271,6 +277,9 @@ fn run(cli: Cli) -> Result<(), Error> {
         Commands::Pipeline { config } => {
             run_pipeline(&config)
         }
+        Commands::Interact => {
+            pipeline::run_interactive()
+        }
         Commands::Bench { op, model, iterations } => {
             run_bench(&op, model.as_ref().map(|v| &**v), iterations)
         }
@@ -280,7 +289,7 @@ fn run(cli: Cli) -> Result<(), Error> {
     }
 }
 
-fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Path>, template_path: Option<&Path>) -> Result<(), Error> {
+pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Path>, template_path: Option<&Path>) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     eprintln!("[open] {} (format: {})", model.display(), format.as_str());
 
@@ -315,7 +324,7 @@ fn run_analyze(model: &Path, sample: usize, json: bool, report_path: Option<&Pat
     Ok(())
 }
 
-fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: bool, yes: bool) -> Result<(), Error> {
+pub(crate) fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: bool, yes: bool) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     eprintln!("[open] {} (format: {})", model.display(), format.as_str());
 
@@ -345,7 +354,7 @@ fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: bool, yes: b
     Ok(())
 }
 
-fn run_svd(
+pub(crate) fn run_svd(
     model: &Path, layers_str: &str, tensors_str: &str, rank_str: &str, dtype_str: &str,
     min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool
 ) -> Result<(), Error> {
@@ -396,7 +405,7 @@ fn run_svd(
     Ok(())
 }
 
-fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: &str, yes: bool) -> Result<(), Error> {
+pub(crate) fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: &str, yes: bool) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     if format != ModelFormat::Gguf {
         return Err(Error::Gguf("quantize currently only supports GGUF".into()));
@@ -414,7 +423,7 @@ fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: &str, yes: 
     Ok(())
 }
 
-fn run_merge(
+pub(crate) fn run_merge(
     model_a: &Path, model_b: Option<&Path>, mode: &str,
     weights_str: Option<&str>, config_path: Option<&Path>,
     out: &Path, yes: bool,
@@ -589,7 +598,7 @@ fn run_merge(
     Ok(())
 }
 
-fn run_moe(model: &Path, strategy: &str, out: &Path, expert_pattern: Option<&str>, yes: bool) -> Result<(), Error> {
+pub(crate) fn run_moe(model: &Path, strategy: &str, out: &Path, expert_pattern: Option<&str>, yes: bool) -> Result<(), Error> {
     eprintln!("[open] {}", model.display());
     let gg = GgufFile::open(model)?;
 
