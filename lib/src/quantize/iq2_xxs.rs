@@ -1,10 +1,10 @@
-//! IQ2_XXS quantizer: 256 elements per super-block, 8 groups of 32,
+﻿//! IQ2_XXS quantizer: 256 elements per super-block, 8 groups of 32,
 //! each group has 4 sub-groups of 8. 2-bit non-linear codebook.
 //!
 //! On-disk: 2 d (f16), 64 qs = 66 bytes / 256 elements.
-//! qs is 8 groups × 8 bytes = 64 bytes, each group stores 2 × u32:
-//!   a0 = 4 × 8-bit grid indices (low)
-//!   a1 = 4 × 7-bit sign indices + 4-bit scale (high nibble)
+//! qs is 8 groups Ã— 8 bytes = 64 bytes, each group stores 2 Ã— u32:
+//!   a0 = 4 Ã— 8-bit grid indices (low)
+//!   a1 = 4 Ã— 7-bit sign indices + 4-bit scale (high nibble)
 //!
 //! Dequant: db = d * (0.5 + scale * 0.25)
 //!          out = db * grid_val * sign
@@ -135,56 +135,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![10.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        let max_err = src.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        // 2-bit codebook grid has no all-43s entry accessible at low offsets, so
-        // error up to ~8 is expected for a constant 10.0 (db*8 ≈ 1.86).
-        assert!(max_err < 10.0, "max_err={}", max_err);
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.3).sin() * 50.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.5).sin() * 100.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Iq2Xxs, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-
-    #[test]
-    fn negative_values() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| -5.0 - i as f32 * 2.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-        for &v in &out {
-            assert!(v <= 0.0);
-        }
-    }
-}
+#[path = "../../tests/unit/quantize/iq2_xxs.rs"]
+mod tests;

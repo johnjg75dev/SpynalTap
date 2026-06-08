@@ -40,6 +40,7 @@ use crate::formats::gguf::types::{
     byte_size_for, dims_product, ArrayValue, GgmlType, MetaValue, MetadataKv,
 };
 use crate::formats::gguf::writer::{GgufWriter, WriterTensor};
+use crate::formats::onnx::{OnnxFile, OnnxWriter};
 use crate::formats::safetensors::reader::SafetensorsFile;
 use crate::formats::safetensors::writer::SafetensorsWriter;
 use crate::model::{Model, TensorDtype};
@@ -341,6 +342,165 @@ pub fn apply_to_safetensors(st: &SafetensorsFile, plan: &SvdPlan, dst: &Path) ->
 
     let bytes_in: u64 = st.tensors.iter().map(|t| t.byte_size).sum();
     write_safetensors_with_metadata(&writer, &header_meta, dst)?;
+    let bytes_out = std::fs::metadata(dst)?.len();
+
+    Ok(SvdReport {
+        bytes_in,
+        bytes_out,
+        targets: plan.targets.len(),
+        applied,
+        skipped: plan
+            .skipped
+            .iter()
+            .map(|s| (s.name.clone(), s.reason.clone()))
+            .collect(),
+        output_path: dst.display().to_string(),
+        orig_tensor_bytes: total_orig,
+        new_tensor_bytes: total_new,
+        compression_ratio: if total_orig == 0 {
+            0.0
+        } else {
+            1.0 - (total_new as f64 / total_orig as f64)
+        },
+    })
+}
+
+// ---- ONNX -----------------------------------------------------------------
+
+pub fn apply_to_onnx(onnx: &OnnxFile, plan: &SvdPlan, dst: &Path) -> Result<SvdReport> {
+    let targets: std::collections::HashMap<&str, &SvdTarget> =
+        plan.targets.iter().map(|t| (t.name.as_str(), t)).collect();
+    let mut writer = OnnxWriter::new();
+
+    // Carry forward metadata.
+    if let Some(name) = onnx.name() {
+        writer = writer.producer(name, "");
+    }
+    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone()) {
+        if !graph_name.is_empty() {
+            writer = writer.graph_name(&graph_name);
+        }
+    }
+    for prop in &onnx.proto.metadata_props {
+        writer.add_metadata(&prop.key, &prop.value);
+    }
+    writer.add_metadata("spynaltap.svd.applied", "true");
+    writer.add_metadata("spynaltap.svd.output_dtype", plan.config.dtype.as_str());
+    writer.add_metadata("spynaltap.svd.targets", &plan.targets.len().to_string());
+
+    let mut applied: Vec<SvdApplied> = Vec::with_capacity(plan.targets.len());
+    let mut total_orig: u64 = 0;
+    let mut total_new: u64 = 0;
+
+    for t in &onnx.tensors {
+        if let Some(target) = targets.get(t.name.as_str()) {
+            let bytes = onnx.read_tensor_bytes(&t.name)?;
+            let f32_vals = match t.dtype {
+                TensorDtype::F32 => bytes_to_f32(&bytes),
+                TensorDtype::F16 => bytes_to_f32_from_f16(&bytes),
+                TensorDtype::Bf16 => bytes_to_f32_from_bf16(&bytes),
+                TensorDtype::F64 => {
+                    let mut out = Vec::with_capacity(bytes.len() / 8);
+                    for c in bytes.chunks_exact(8) {
+                        out.push(f64::from_le_bytes([
+                            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                        ]) as f32);
+                    }
+                    out
+                }
+                other => {
+                    return Err(Error::Svd(format!(
+                        "unsupported ONNX dtype for SVD: {:?}",
+                        other
+                    )))
+                }
+            };
+            if f32_vals.len() != target.m * target.n {
+                return Err(Error::Svd(format!(
+                    "tensor '{}': decoded {} elems, expected {}",
+                    t.name,
+                    f32_vals.len(),
+                    target.m * target.n
+                )));
+            }
+            let a_mat = Mat::from_vec(target.m, target.n, f32_vals);
+            let k = if target.k == 0 {
+                plan.config
+                    .resolve_rank(&t.name, 0, target.m, target.n, None)
+            } else {
+                target.k
+            };
+            let (svd, effective_k) = run_svd(&a_mat, k, &plan.config, &t.name, target)?;
+            let (a_packed, b_packed) = pack_lowrank(&svd);
+            let a_pack = slice_cols(&a_packed, 0, effective_k);
+            let b_pack = slice_rows(&b_packed, 0, effective_k);
+            let approx_err = approx_error(&a_mat, &a_pack, &b_pack);
+
+            let src_ggml = tensordtype_to_ggml(t.dtype);
+            let a_bytes = encode_factors(&a_pack, plan.config.dtype, target.m, effective_k, src_ggml);
+            let b_bytes = encode_factors(&b_pack, plan.config.dtype, effective_k, target.n, src_ggml);
+            let out_dt = dtype_to_tensordtype(plan.config.dtype, src_ggml);
+
+            // Write SVD factors via add_tensor to get proper ONNX dtype.
+            let a_shape: Vec<u64> = vec![target.m as u64, effective_k as u64];
+            writer.add_tensor(&target.name_a, out_dt, &a_shape, &a_bytes)?;
+            let b_shape: Vec<u64> = vec![effective_k as u64, target.n as u64];
+            writer.add_tensor(&target.name_b, out_dt, &b_shape, &b_bytes)?;
+
+            let new_bytes = (a_bytes.len() + b_bytes.len()) as u64;
+            total_orig += target.orig_bytes;
+            total_new += new_bytes;
+            let method = if plan.config.randomized
+                && (target.m * target.n) >= plan.config.randomized_min_elems
+            {
+                "randomized".to_string()
+            } else {
+                "jacobi".to_string()
+            };
+            applied.push(SvdApplied {
+                name: t.name.clone(),
+                name_a: target.name_a.clone(),
+                name_b: target.name_b.clone(),
+                m: target.m,
+                n: target.n,
+                k: effective_k,
+                method,
+                orig_bytes: target.orig_bytes,
+                new_bytes,
+                approx_error: approx_err,
+            });
+        } else {
+            let bytes = onnx.read_tensor_bytes(&t.name)?;
+            let data_type = match t.dtype {
+                TensorDtype::F32 => 1,
+                TensorDtype::F16 => 10,
+                TensorDtype::Bf16 => 16,
+                TensorDtype::F64 => 11,
+                TensorDtype::I8 => 3,
+                TensorDtype::I16 => 5,
+                TensorDtype::I32 => 6,
+                TensorDtype::I64 => 7,
+                TensorDtype::Unknown(0) => 9,
+                TensorDtype::Unknown(8) => 2,
+                TensorDtype::Unknown(16) => 4,
+                TensorDtype::Unknown(32) => 12,
+                TensorDtype::Unknown(64) => 13,
+                _ => {
+                    return Err(Error::Svd(format!(
+                        "unsupported ONNX dtype for passthrough: {:?}",
+                        t.dtype
+                    )))
+                }
+            };
+            let shape_i64: Vec<i64> = t.shape.iter().map(|&d| d as i64).collect();
+            writer.add_raw(&t.name, data_type, &shape_i64, &bytes);
+        }
+    }
+
+    let bytes_in: u64 = onnx.tensors.iter().map(|t| t.byte_size).sum();
+    let out_file = std::fs::File::create(dst)?;
+    writer.write_to(&out_file)?;
+    out_file.sync_all()?;
     let bytes_out = std::fs::metadata(dst)?.len();
 
     Ok(SvdReport {

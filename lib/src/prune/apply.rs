@@ -12,9 +12,10 @@ use crate::error::{Error, Result};
 use crate::formats::gguf::reader::GgufFile;
 use crate::formats::gguf::types::{ArrayValue, MetaValue};
 use crate::formats::gguf::writer::GgufWriter;
+use crate::formats::onnx::{OnnxFile, OnnxWriter};
 use crate::formats::safetensors::reader::SafetensorsFile;
 use crate::formats::safetensors::writer::SafetensorsWriter;
-use crate::model::Model;
+use crate::model::{Model, TensorDtype};
 use crate::prune::plan::PrunePlan;
 use std::collections::HashSet;
 use std::io::Write;
@@ -335,6 +336,101 @@ pub fn apply_to_safetensors(
         kept_count += 1;
     }
     let bytes_in: u64 = st.tensors.iter().map(|t| t.byte_size).sum();
+    let out_file = std::fs::File::create(dst)?;
+    writer.write_to(&out_file)?;
+    out_file.sync_all()?;
+
+    let bytes_out = std::fs::metadata(dst)?.len();
+    Ok(PruneReport {
+        bytes_in,
+        bytes_out,
+        tensors_kept: kept_count,
+        tensors_dropped: dropped_count,
+        blocks_dropped: plan.dropped_blocks.clone(),
+        original_block_count: plan.original_block_count,
+        new_block_count: plan.new_block_count,
+        output_path: dst.display().to_string(),
+    })
+}
+
+pub fn apply_to_onnx(onnx: &OnnxFile, plan: &PrunePlan, dst: &Path) -> Result<PruneReport> {
+    let mut writer = OnnxWriter::new();
+
+    // Carry forward producer/graph metadata from source.
+    if let Some(name) = onnx.name() {
+        writer = writer.producer(name, "");
+    }
+    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone()) {
+        if !graph_name.is_empty() {
+            writer = writer.graph_name(&graph_name);
+        }
+    }
+    // Carry forward ONNX metadata properties.
+    for prop in &onnx.proto.metadata_props {
+        writer.add_metadata(&prop.key, &prop.value);
+    }
+    // Add prune traceability.
+    let drop_str: Vec<String> = plan
+        .dropped_blocks
+        .iter()
+        .map(|i| i.to_string())
+        .collect();
+    writer.add_metadata("spynaltap.prune.dropped_blocks", &drop_str.join(","));
+    writer.add_metadata(
+        "spynaltap.prune.original_block_count",
+        &plan.original_block_count.to_string(),
+    );
+    writer.add_metadata(
+        "spynaltap.prune.new_block_count",
+        &plan.new_block_count.to_string(),
+    );
+    writer.add_metadata("spynaltap.prune.method", "prune");
+
+    let mut kept_count = 0usize;
+    let mut dropped_count = 0usize;
+
+    // For ONNX, block naming is ONNX-style (layer.N.*), not GGUF-style (blk.N.*).
+    // The rename_block function handles both by using ONNX naming preserved
+    // in the tensor names.
+    for (name, keep) in &plan.keep {
+        if !*keep {
+            dropped_count += 1;
+            continue;
+        }
+        let t = onnx
+            .tensor(name)
+            .ok_or_else(|| Error::TensorNotFound(name.clone()))?;
+        let bytes = onnx.read_tensor_bytes(name)?;
+        let new_name = rename_block(name, &plan.remap);
+
+        // Map TensorDtype to ONNX data type int
+        let data_type = match t.dtype {
+            TensorDtype::F32 => 1,
+            TensorDtype::F16 => 10,
+            TensorDtype::Bf16 => 16,
+            TensorDtype::F64 => 11,
+            TensorDtype::I8 => 3,
+            TensorDtype::I16 => 5,
+            TensorDtype::I32 => 6,
+            TensorDtype::I64 => 7,
+            TensorDtype::Unknown(0) => 9,
+            TensorDtype::Unknown(8) => 2,
+            TensorDtype::Unknown(16) => 4,
+            TensorDtype::Unknown(32) => 12,
+            TensorDtype::Unknown(64) => 13,
+            _ => {
+                return Err(Error::Onnx(format!(
+                    "unsupported dtype {:?} for ONNX output tensor '{}'",
+                    t.dtype, name
+                )));
+            }
+        };
+        let shape_i64: Vec<i64> = t.shape.iter().map(|&d| d as i64).collect();
+        writer.add_raw(&new_name, data_type, &shape_i64, &bytes);
+        kept_count += 1;
+    }
+
+    let bytes_in: u64 = onnx.tensors.iter().map(|t| t.byte_size).sum();
     let out_file = std::fs::File::create(dst)?;
     writer.write_to(&out_file)?;
     out_file.sync_all()?;

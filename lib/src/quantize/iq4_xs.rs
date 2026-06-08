@@ -1,11 +1,11 @@
-//! IQ4_XS quantizer: 256 elements per super-block, 8 sub-blocks of 32, 4-bit.
+﻿//! IQ4_XS quantizer: 256 elements per super-block, 8 sub-blocks of 32, 4-bit.
 //!
 //! On-disk: 2 d (f16), 4 scales_l, 2 scales_h (u16), 128 qs = 136 bytes / 256 el.
 //! Dequant: x = d * (ls - 32) * KVALUES_IQ4NL[idx]
 //!
-//! ## Scale packing (6 bits per sub-block × 8 = 48 bits)
+//! ## Scale packing (6 bits per sub-block Ã— 8 = 48 bits)
 //!
-//! Sub-block s has a 6-bit signed value ls ∈ [0, 63]; the effective scale is
+//! Sub-block s has a 6-bit signed value ls âˆˆ [0, 63]; the effective scale is
 //! (ls - 32). The low 4 bits of ls[s] are packed into `scales_l[s/2]` at
 //! nibble position 4*(s%2). The high 2 bits are packed into `scales_h` at
 //! bit position 2*s.
@@ -13,8 +13,8 @@
 //! | Range      | Bytes | Content                          |
 //! |------------|-------|----------------------------------|
 //! | [0,  2)    | 2     | d (f16)                          |
-//! | [2,  6)    | 4     | scales_l (low nibbles × 8)       |
-//! | [6,  8)    | 2     | scales_h (high 2 bits × 8 as u16)|
+//! | [2,  6)    | 4     | scales_l (low nibbles Ã— 8)       |
+//! | [6,  8)    | 2     | scales_h (high 2 bits Ã— 8 as u16)|
 //! | [8, 136)   | 128   | qs (4-bit indices, 2 per byte)   |
 
 use crate::formats::gguf::dequant;
@@ -116,54 +116,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![10.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        let max_err = src.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(max_err < 2.0, "max_err={}", max_err);
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.3).sin() * 50.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.5).sin() * 100.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Iq4Xs, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-
-    #[test]
-    fn negative_values() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| -5.0 - i as f32 * 2.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-        for &v in &out {
-            assert!(v <= 0.0);
-        }
-    }
-}
+#[path = "../../tests/unit/quantize/iq4_xs.rs"]
+mod tests;

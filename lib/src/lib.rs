@@ -1,7 +1,7 @@
 //! `spynaltap` — fast AI model analyzer and transformer-block pruner.
 //!
-//! Supports GGUF (v1–v3) and safetensors. Per-block "removability" is
-//! scored heuristically by default; the `calibrate` feature uses `candle`
+//! Supports GGUF (v1–v3), safetensors, and ONNX. Per-block "removability"
+//! is scored heuristically by default; the `calibrate` feature uses `candle`
 //! to run a forward pass and rank blocks by activation-delta instead.
 //!
 //! Quick start:
@@ -31,6 +31,7 @@ pub mod report;
 pub mod svd;
 
 #[cfg(test)]
+#[path = "../tests/unit/tests/mod.rs"]
 mod tests;
 
 pub use analysis::{

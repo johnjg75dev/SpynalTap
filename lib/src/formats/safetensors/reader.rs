@@ -176,6 +176,9 @@ fn dtype_from_str(s: &str) -> Option<TensorDtype> {
         "I32" => TensorDtype::I32,
         "I64" => TensorDtype::I64,
         "U8" => TensorDtype::Unknown(8),
+        "U16" => TensorDtype::Unknown(16),
+        "U32" => TensorDtype::Unknown(32),
+        "U64" => TensorDtype::Unknown(64),
         "BOOL" => TensorDtype::Unknown(0),
         _ => return None,
     })

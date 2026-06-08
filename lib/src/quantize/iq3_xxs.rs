@@ -1,7 +1,7 @@
-//! IQ3_XXS quantizer: 256 elements per super-block, 3-bit non-linear codebook.
+﻿//! IQ3_XXS quantizer: 256 elements per super-block, 3-bit non-linear codebook.
 //!
 //! On-disk: 2 d (f16), 64 qs, 32 scs = 98 bytes / 256 elements.
-//! 8 groups × 32 elements, each group has 4 sub-groups of 8.
+//! 8 groups Ã— 32 elements, each group has 4 sub-groups of 8.
 //! Per group: scs[g*4..g*4+4] decoded as u32 aux32.
 //!   db = d * (0.5 + (aux32>>28) * 0.5)
 //!   Signs from KSIGNS_IQ2XS[(aux32 >> (7*l)) & 0x7F]
@@ -138,43 +138,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![10.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        let max_err = src.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(max_err < 12.0, "max_err={}", max_err);
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.3).sin() * 50.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.5).sin() * 100.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Iq3Xxs, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-}
+#[path = "../../tests/unit/quantize/iq3_xxs.rs"]
+mod tests;

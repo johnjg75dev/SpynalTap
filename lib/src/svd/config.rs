@@ -1,43 +1,43 @@
-//! SVD-compression configuration.
+﻿//! SVD-compression configuration.
 //!
 //! ## Layer selection grammar
 //!
 //! ```text
-//!   all                          — every block
-//!   0-23                         — inclusive range
-//!   0,1,2                        — explicit list
-//!   0-5,10,20-22                 — combinations
-//!   regex:^blk\.(0|1|2)\.       — by regex (matched against tensor name)
-//!   all-attn                     — alias for all 2D attention projections
-//!   all-ffn                      — alias for all 2D FFN projections
-//!   all-mlp                      — alias for all 2D attention + FFN projections
+//!   all                          â€” every block
+//!   0-23                         â€” inclusive range
+//!   0,1,2                        â€” explicit list
+//!   0-5,10,20-22                 â€” combinations
+//!   regex:^blk\.(0|1|2)\.       â€” by regex (matched against tensor name)
+//!   all-attn                     â€” alias for all 2D attention projections
+//!   all-ffn                      â€” alias for all 2D FFN projections
+//!   all-mlp                      â€” alias for all 2D attention + FFN projections
 //! ```
 //!
 //! ## Tensor selection grammar (per selected layer)
 //!
 //! ```text
-//!   attn                         — attn_q, attn_k, attn_v, attn_output
-//!   ffn                          — ffn_up, ffn_down, ffn_gate, ffn_gate_up
-//!   mlp                          — same as attn+ffn
-//!   attn_q,attn_v                — explicit list of suffixes
-//!   regex:^.*\.weight$           — by regex (matched against tensor name suffix after `blk.N.`)
-//!   all                          — any 2D weight
+//!   attn                         â€” attn_q, attn_k, attn_v, attn_output
+//!   ffn                          â€” ffn_up, ffn_down, ffn_gate, ffn_gate_up
+//!   mlp                          â€” same as attn+ffn
+//!   attn_q,attn_v                â€” explicit list of suffixes
+//!   regex:^.*\.weight$           â€” by regex (matched against tensor name suffix after `blk.N.`)
+//!   all                          â€” any 2D weight
 //! ```
 //!
 //! ## Rank specification grammar
 //!
 //! ```text
-//!   64                           — absolute rank for every selected tensor
-//!   0.5                          — fraction of min(m, n) (50% in this example)
-//!   energy:0.99                  — keep enough singular values to retain 99% of squared-singular-value sum
-//!   abs:64,min:8,max:512         — absolute rank, with floor/ceiling clamps
-//!   frac:0.5,min:8,max:512       — fractional with clamps
+//!   64                           â€” absolute rank for every selected tensor
+//!   0.5                          â€” fraction of min(m, n) (50% in this example)
+//!   energy:0.99                  â€” keep enough singular values to retain 99% of squared-singular-value sum
+//!   abs:64,min:8,max:512         â€” absolute rank, with floor/ceiling clamps
+//!   frac:0.5,min:8,max:512       â€” fractional with clamps
 //! ```
 //!
 //! ## Output dtype
 //!
 //! ```text
-//!   f32, f16, bf16               — element type for the packed (A, B) factors
+//!   f32, f16, bf16               â€” element type for the packed (A, B) factors
 //! ```
 
 use crate::error::{Error, Result};
@@ -112,14 +112,14 @@ pub struct AdjacentEntry {
 ///   N     := signed integer offset applied to the block index
 ///           of the most recent role (default 0).
 ///
-///   ""    — no adjacent selection (returns Ok(None) from parse).
+///   ""    â€” no adjacent selection (returns Ok(None) from parse).
 /// ```
 ///
 /// Examples:
-///   `attn_v`          — same-block attn_v
-///   `attn_v+1`        — next-block attn_v
-///   `attn_v-1`        — previous-block attn_v
-///   `ffn_gate-2+ffn_up+1` — ffn_gate two blocks back, ffn_up one ahead
+///   `attn_v`          â€” same-block attn_v
+///   `attn_v+1`        â€” next-block attn_v
+///   `attn_v-1`        â€” previous-block attn_v
+///   `ffn_gate-2+ffn_up+1` â€” ffn_gate two blocks back, ffn_up one ahead
 #[derive(Debug, Clone, Default)]
 pub struct AdjacentSelection {
     pub entries: Vec<AdjacentEntry>,
@@ -615,87 +615,5 @@ pub(crate) fn suffix_in(name: &str, suffixes: &[&str]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_layers_all() {
-        assert!(matches!(
-            LayerSelection::parse("all").unwrap(),
-            LayerSelection::All
-        ));
-    }
-    #[test]
-    fn parse_layers_range() {
-        match LayerSelection::parse("0-3,7").unwrap() {
-            LayerSelection::Indices(v) => assert_eq!(v, vec![0, 1, 2, 3, 7]),
-            _ => panic!(),
-        }
-    }
-    #[test]
-    fn parse_layers_alias() {
-        assert!(matches!(
-            LayerSelection::parse("all-mlp").unwrap(),
-            LayerSelection::AllMlp
-        ));
-    }
-    #[test]
-    fn parse_tensors_attn() {
-        assert!(TensorSelection::parse("attn")
-            .unwrap()
-            .matches("blk.0.attn_q.weight"));
-        assert!(!TensorSelection::parse("attn")
-            .unwrap()
-            .matches("blk.0.ffn_up.weight"));
-    }
-    #[test]
-    fn parse_rank_int() {
-        let r = RankSpecWithClamps::parse("64").unwrap();
-        assert_eq!(r.resolve(100, 100, None), 64);
-    }
-    #[test]
-    fn parse_rank_frac() {
-        let r = RankSpecWithClamps::parse("0.5,min:4,max:200").unwrap();
-        assert_eq!(r.resolve(100, 100, None), 50);
-        assert_eq!(r.resolve(8, 8, None), 4);
-    }
-    #[test]
-    fn parse_rank_energy() {
-        let s = vec![10.0, 9.0, 1.0, 0.1];
-        let r = RankSpecWithClamps::parse("energy:0.99").unwrap();
-        // squared s: 100, 81, 1, 0.01 -> total 182.01. 99% threshold = 180.19.
-        // First two (181) already exceed 180.19, so k=2.
-        assert_eq!(r.resolve(10, 10, Some(&s)), 2);
-
-        // 0.9999: 99.99% of 182.01 = 181.998 -> k=3 (sum 182 > 181.998).
-        let r2 = RankSpecWithClamps::parse("energy:0.9999").unwrap();
-        assert_eq!(r2.resolve(10, 10, Some(&s)), 3);
-
-        // 0.5 needs only the dominant singular value.
-        let r3 = RankSpecWithClamps::parse("energy:0.5").unwrap();
-        assert_eq!(r3.resolve(10, 10, Some(&s)), 1);
-    }
-    #[test]
-    fn parse_dtype() {
-        assert_eq!(OutputDtype::parse("f16").unwrap(), OutputDtype::F16);
-        assert_eq!(OutputDtype::parse("bf16").unwrap(), OutputDtype::Bf16);
-        assert_eq!(
-            OutputDtype::parse("auto").unwrap(),
-            OutputDtype::AutoQuant
-        );
-        assert_eq!(
-            OutputDtype::parse("q8_0").unwrap(),
-            OutputDtype::Ggml(crate::formats::gguf::types::GgmlType::Q8_0)
-        );
-        assert!(OutputDtype::parse("garbage").is_err());
-    }
-    #[test]
-    fn factor_names() {
-        let mut cfg = SvdConfig::default();
-        cfg.suffix_a = ".lora_a".into();
-        cfg.suffix_b = ".lora_b".into();
-        let (a, b) = cfg.factor_names("blk.5.attn_q.weight");
-        assert_eq!(a, "blk.5.attn_q.weight.lora_a");
-        assert_eq!(b, "blk.5.attn_q.weight.lora_b");
-    }
-}
+#[path = "../../tests/unit/svd/config.rs"]
+mod tests;

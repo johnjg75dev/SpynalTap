@@ -1,8 +1,8 @@
-//! TQ1_0 quantizer: 176 elements per block, ternary (1-bit).
+﻿//! TQ1_0 quantizer: 176 elements per block, ternary (1-bit).
 //!
 //! On-disk: 2 d (f16), 32 qs, 4 qh = 38 bytes / block.
-//! qs: 32 bytes × 5 trits = 160 elements
-//! qh: 4 bytes × 4 trits = 16 elements
+//! qs: 32 bytes Ã— 5 trits = 160 elements
+//! qh: 4 bytes Ã— 4 trits = 16 elements
 //!
 //! NOTE: The dequant currently only produces 176 values per block (not 256),
 //! so this quantizer operates on 176-element blocks.
@@ -10,11 +10,11 @@
 //! The dequant uses a multiplicative-inverse trick to decode base-3 trits,
 //! which is NOT standard base-3 packing. The encoding formulas are:
 //!
-//! 5 trits: value = t0 + t1·3 + t2·9 + t3·27 + t4·81
-//!           byte = (x5 + 256·value) / 243,  x5 = (243 − 13·value mod 243) mod 243
+//! 5 trits: value = t0 + t1Â·3 + t2Â·9 + t3Â·27 + t4Â·81
+//!           byte = (x5 + 256Â·value) / 243,  x5 = (243 âˆ’ 13Â·value mod 243) mod 243
 //!
-//! 4 trits: value = t0 + t1·3 + t2·9 + t3·27
-//!           byte = (x4 + 256·value) / 81,   x4 = (81 − 13·value mod 81) mod 81
+//! 4 trits: value = t0 + t1Â·3 + t2Â·9 + t3Â·27
+//!           byte = (x4 + 256Â·value) / 81,   x4 = (81 âˆ’ 13Â·value mod 81) mod 81
 
 use crate::formats::gguf::dequant;
 use crate::formats::gguf::types::GgmlType;
@@ -107,44 +107,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![2.0f32; ELEMS];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        for v in &out {
-            assert!((v - 2.0).abs() < 0.001 || (v - 0.0).abs() < 0.001);
-        }
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; ELEMS];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..ELEMS).map(|i| ((i as f32) * 0.1).sin() * 3.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), ELEMS);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..ELEMS).map(|i| ((i as f32) * 0.1).sin() * 5.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Tq1_0, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-}
+#[path = "../../tests/unit/quantize/tq1_0.rs"]
+mod tests;

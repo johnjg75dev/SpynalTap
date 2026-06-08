@@ -45,4 +45,10 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("invalid ONNX file: {0}")]
+    Onnx(String),
+
+    #[error("protobuf error: {0}")]
+    Protobuf(#[from] prost::DecodeError),
 }

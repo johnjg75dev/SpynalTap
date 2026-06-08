@@ -1,9 +1,9 @@
-//! IQ3_S quantizer: 256 elements per super-block, 3-bit non-linear codebook.
+﻿//! IQ3_S quantizer: 256 elements per super-block, 3-bit non-linear codebook.
 //!
 //! On-disk: 2 d (f16), 64 qs, 8 qh, 32 signs, 4 scales = 110 bytes / 256 elements.
-//! 8 groups × 32 elements, processes groups in pairs (ib32 step 2).
-//! Per pair: scales[ib32/2] → db1 = d*(1+2*(lo&0xF)), db2 = d*(1+2*(hi>>4))
-//! Each sub-group: 2 × 9-bit grid indices from qs (low 8) + qh (high bit).
+//! 8 groups Ã— 32 elements, processes groups in pairs (ib32 step 2).
+//! Per pair: scales[ib32/2] â†’ db1 = d*(1+2*(lo&0xF)), db2 = d*(1+2*(hi>>4))
+//! Each sub-group: 2 Ã— 9-bit grid indices from qs (low 8) + qh (high bit).
 //!   g1: qs[g*8+2*l] | ((qh[g] << (8-2*l)) & 0x100)
 //!   g2: qs[g*8+2*l+1] | ((qh[g] << (7-2*l)) & 0x100)
 //! Signs: signs[g*4+l] as 8-bit mask (bits 0-3 for g1, bits 4-7 for g2)
@@ -167,43 +167,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![10.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        let max_err = src.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(max_err < 20.0, "max_err={}", max_err);
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; BLOCK_LEN];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.3).sin() * 50.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), BLOCK_LEN);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..BLOCK_LEN).map(|i| ((i as f32) * 0.5).sin() * 100.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Iq3S, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-}
+#[path = "../../tests/unit/quantize/iq3_s.rs"]
+mod tests;

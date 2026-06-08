@@ -100,6 +100,11 @@ fn dtype_to_str(d: TensorDtype) -> &'static str {
         TensorDtype::I16 => "I16",
         TensorDtype::I32 => "I32",
         TensorDtype::I64 => "I64",
+        TensorDtype::Unknown(0) => "BOOL",
+        TensorDtype::Unknown(8) => "U8",
+        TensorDtype::Unknown(16) => "U16",
+        TensorDtype::Unknown(32) => "U32",
+        TensorDtype::Unknown(64) => "U64",
         _ => "U8",
     }
 }

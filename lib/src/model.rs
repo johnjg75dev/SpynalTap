@@ -8,6 +8,7 @@ use std::path::Path;
 pub enum ModelFormat {
     Gguf,
     Safetensors,
+    Onnx,
 }
 
 impl ModelFormat {
@@ -15,10 +16,12 @@ impl ModelFormat {
         match path.extension().and_then(|e| e.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("gguf") => Self::Gguf,
             Some(ext)
-                if ext.eq_ignore_ascii_case("safetensors") || ext.eq_ignore_ascii_case("st") =>
+                if ext.eq_ignore_ascii_case("safetensors")
+                    || ext.eq_ignore_ascii_case("st") =>
             {
                 Self::Safetensors
             }
+            Some(ext) if ext.eq_ignore_ascii_case("onnx") => Self::Onnx,
             _ => Self::Gguf,
         }
     }
@@ -27,6 +30,7 @@ impl ModelFormat {
         match self {
             Self::Gguf => "gguf",
             Self::Safetensors => "safetensors",
+            Self::Onnx => "onnx",
         }
     }
 }

@@ -21,16 +21,17 @@ use spynaltap::formats::gguf::dequant as gguf_dequant;
 use spynaltap::formats::gguf::writer::GgufWriter;
 use spynaltap::formats::gguf::GgufFile;
 use spynaltap::formats::gguf::types::{dims_product, GgmlType, MetaValue, MetadataKv};
+use spynaltap::formats::onnx::OnnxFile;
 use spynaltap::formats::safetensors::SafetensorsFile;
 use spynaltap::merge::{slerp_tensors, MoEWeights, MoEMergeStrategy, merge_experts};
 use spynaltap::model::ModelFormat;
 use spynaltap::prune::{
-    apply_to_gguf, apply_to_safetensors, build_plan, parse_selection,
+    apply_to_gguf, apply_to_onnx, apply_to_safetensors, build_plan, parse_selection,
 };
 use spynaltap::quantize::apply::quantize_gguf as quantize_gguf_apply;
 use spynaltap::svd::{
     AdjacentSelection, LayerSelection, OutputDtype, RankSpecWithClamps, SvdConfig, TensorSelection,
-    apply_to_gguf as svd_apply_gguf, apply_to_safetensors as svd_apply_st,
+    apply_to_gguf as svd_apply_gguf, apply_to_onnx as svd_apply_onnx, apply_to_safetensors as svd_apply_st,
     build_plan as build_svd_plan,
 };
 use spynaltap::{Analyzer, Error};
@@ -342,6 +343,26 @@ pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: 
                 print_dry_run_analysis(&analysis);
             }
         }
+        ModelFormat::Onnx => {
+            let onnx = OnnxFile::open(model)?;
+            let analysis = Analyzer::with_sample_per_tensor(sample).analyze(&onnx)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&analysis)?);
+            } else {
+                print_human_report(&onnx, &analysis);
+            }
+            if let Some(path) = report_path {
+                if dry_run {
+                    eprintln!("[dry-run] would write report to {}", path.display());
+                } else {
+                    write_html_report(&analysis, path, template_path)?;
+                    eprintln!("[report] wrote {}", path.display());
+                }
+            }
+            if dry_run {
+                print_dry_run_analysis(&analysis);
+            }
+        }
     }
     Ok(())
 }
@@ -370,6 +391,14 @@ pub(crate) fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: b
             let plan = build_plan(&st, &selection, Some(&analysis.blocks))?;
             confirm_or_exit(&format!("prune {:?}", plan.dropped_blocks), out, yes)?;
             let report = apply_to_safetensors(&st, &plan, out)?;
+            print_prune_report(&report);
+        }
+        ModelFormat::Onnx => {
+            let onnx = OnnxFile::open(model)?;
+            let analysis = Analyzer::new().analyze(&onnx)?;
+            let plan = build_plan(&onnx, &selection, Some(&analysis.blocks))?;
+            confirm_or_exit(&format!("prune {:?}", plan.dropped_blocks), out, yes)?;
+            let report = apply_to_onnx(&onnx, &plan, out)?;
             print_prune_report(&report);
         }
     }
@@ -421,6 +450,14 @@ pub(crate) fn run_svd(
             print_svd_plan_summary(&plan);
             confirm_or_exit(&format!("SVD compress {} targets", plan.targets.len()), out, yes)?;
             let report = svd_apply_st(&st, &plan, out)?;
+            print_svd_report(&report);
+        }
+        ModelFormat::Onnx => {
+            let onnx = OnnxFile::open(model)?;
+            let plan = build_svd_plan(&onnx, &cfg)?;
+            print_svd_plan_summary(&plan);
+            confirm_or_exit(&format!("SVD compress {} targets", plan.targets.len()), out, yes)?;
+            let report = svd_apply_onnx(&onnx, &plan, out)?;
             print_svd_report(&report);
         }
     }

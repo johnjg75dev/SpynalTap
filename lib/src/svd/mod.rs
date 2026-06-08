@@ -30,7 +30,7 @@ pub mod config;
 pub mod linalg;
 pub mod plan;
 
-pub use apply::{apply_to_gguf, apply_to_safetensors, SvdApplied, SvdReport};
+pub use apply::{apply_to_gguf, apply_to_onnx, apply_to_safetensors, SvdApplied, SvdReport};
 pub use config::{
     AdjacentEntry, AdjacentRole, AdjacentSelection, LayerSelection, OutputDtype, RankClamps,
     RankSpec, RankSpecWithClamps, SvdConfig, TensorSelection, ATTN_SUFFIXES, FFN_SUFFIXES,

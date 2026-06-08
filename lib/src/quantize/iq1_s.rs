@@ -1,6 +1,6 @@
-//! IQ1_S quantizer: 256 elements per super-block, 1-bit.
+﻿//! IQ1_S quantizer: 256 elements per super-block, 1-bit.
 //!
-//! On-disk: 2 d (f16), 16 qh (8 × u16), 32 qs = 50 bytes / 256 elements.
+//! On-disk: 2 d (f16), 16 qh (8 Ã— u16), 32 qs = 50 bytes / 256 elements.
 //! Each group of 32 elements uses a 3-bit per-group scale, a delta sign,
 //! and 4 sub-groups of 8 elements each referencing a shared codebook
 //! (IQ1S_GRID with 2048 entries).
@@ -117,42 +117,5 @@ pub fn dequant(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_constant() {
-        let src = vec![1.0f32; QK_K];
-        let bytes = quantize(&src);
-        assert_eq!(bytes.len(), BLOCK_BYTES);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), QK_K);
-    }
-
-    #[test]
-    fn roundtrip_all_zero() {
-        let src = vec![0.0f32; QK_K];
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        for &v in &out {
-            assert_eq!(v, 0.0);
-        }
-    }
-
-    #[test]
-    fn roundtrip_sine() {
-        let src: Vec<f32> = (0..QK_K).map(|i| ((i as f32) * 0.07).sin() * 500.0).collect();
-        let bytes = quantize(&src);
-        let out = dequant(&bytes);
-        assert_eq!(out.len(), QK_K);
-    }
-
-    #[test]
-    fn matches_dequant() {
-        let src: Vec<f32> = (0..QK_K).map(|i| ((i as f32) * 0.05).sin() * 300.0).collect();
-        let bytes = quantize(&src);
-        let direct = dequant(&bytes);
-        let via = dequant::dequantize(GgmlType::Iq1S, &bytes, None).unwrap();
-        assert_eq!(direct, via);
-    }
-}
+#[path = "../../tests/unit/quantize/iq1_s.rs"]
+mod tests;

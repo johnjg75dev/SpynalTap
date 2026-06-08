@@ -23,6 +23,7 @@ mod strategy;
 mod tying;
 
 #[cfg(test)]
+#[path = "../../tests/unit/merge/tests.rs"]
 mod tests;
 
 pub use average::{average_into, average_tensors};
