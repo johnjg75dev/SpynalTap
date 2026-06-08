@@ -17,16 +17,16 @@
 //!
 //! We add the following `MetaValue` pairs to the output file:
 //!
-//! * `spynaltap.svd.applied`             — bool true
-//! * `spynaltap.svd.method`              — string (jacobi / randomized)
-//! * `spynaltap.svd.output_dtype`        — string
-//! * `spynaltap.svd.targets`             — u32
-//! * `spynaltap.svd.orig_bytes`          — u64
-//! * `spynaltap.svd.new_bytes`           — u64
-//! * `spynaltap.svd.compression_ratio`   — f32
-//! * `spynaltap.svd.<name>.rank`         — u32
-//! * `spynaltap.svd.<name>.shape`        — array[f32] of [m, n, k]
-//! * `spynaltap.svd.<name>.approx_error` — f32 (residual Frobenius ratio)
+//! * `tensorkit.svd.applied`             — bool true
+//! * `tensorkit.svd.method`              — string (jacobi / randomized)
+//! * `tensorkit.svd.output_dtype`        — string
+//! * `tensorkit.svd.targets`             — u32
+//! * `tensorkit.svd.orig_bytes`          — u64
+//! * `tensorkit.svd.new_bytes`           — u64
+//! * `tensorkit.svd.compression_ratio`   — f32
+//! * `tensorkit.svd.<name>.rank`         — u32
+//! * `tensorkit.svd.<name>.shape`        — array[f32] of [m, n, k]
+//! * `tensorkit.svd.<name>.approx_error` — f32 (residual Frobenius ratio)
 //!
 //! ## Metadata (safetensors)
 //!
@@ -384,9 +384,9 @@ pub fn apply_to_onnx(onnx: &OnnxFile, plan: &SvdPlan, dst: &Path) -> Result<SvdR
     for prop in &onnx.proto.metadata_props {
         writer.add_metadata(&prop.key, &prop.value);
     }
-    writer.add_metadata("spynaltap.svd.applied", "true");
-    writer.add_metadata("spynaltap.svd.output_dtype", plan.config.dtype.as_str());
-    writer.add_metadata("spynaltap.svd.targets", &plan.targets.len().to_string());
+    writer.add_metadata("tensorkit.svd.applied", "true");
+    writer.add_metadata("tensorkit.svd.output_dtype", plan.config.dtype.as_str());
+    writer.add_metadata("tensorkit.svd.targets", &plan.targets.len().to_string());
 
     let mut applied: Vec<SvdApplied> = Vec::with_capacity(plan.targets.len());
     let mut total_orig: u64 = 0;
@@ -809,34 +809,34 @@ fn build_svd_kvs(plan: &SvdPlan) -> Vec<MetadataKv> {
         crate::svd::config::RankSpec::Energy(_) => "jacobi+energy",
     };
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.applied".into(),
+        key: "tensorkit.svd.applied".into(),
         value_type: 7,
         value: MetaValue::Bool(true),
     });
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.method".into(),
+        key: "tensorkit.svd.method".into(),
         value_type: 8,
         value: MetaValue::String(method_str.into()),
     });
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.output_dtype".into(),
+        key: "tensorkit.svd.output_dtype".into(),
         value_type: 8,
         value: MetaValue::String(plan.config.dtype.as_str().into()),
     });
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.targets".into(),
+        key: "tensorkit.svd.targets".into(),
         value_type: 4,
         value: MetaValue::U32(plan.targets.len() as u32),
     });
     let total_orig: u64 = plan.targets.iter().map(|t| t.orig_bytes).sum();
     let total_new: u64 = plan.targets.iter().map(|t| t.new_bytes).sum();
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.orig_bytes".into(),
+        key: "tensorkit.svd.orig_bytes".into(),
         value_type: 10,
         value: MetaValue::U64(total_orig),
     });
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.new_bytes".into(),
+        key: "tensorkit.svd.new_bytes".into(),
         value_type: 10,
         value: MetaValue::U64(total_new),
     });
@@ -846,19 +846,19 @@ fn build_svd_kvs(plan: &SvdPlan) -> Vec<MetadataKv> {
         1.0 - (total_new as f64 / total_orig as f64)
     };
     kvs.push(MetadataKv {
-        key: "spynaltap.svd.compression_ratio".into(),
+        key: "tensorkit.svd.compression_ratio".into(),
         value_type: 6,
         value: MetaValue::F32(ratio as f32),
     });
 
     for t in &plan.targets {
-        let key = format!("spynaltap.svd.{}.rank", t.name);
+        let key = format!("tensorkit.svd.{}.rank", t.name);
         kvs.push(MetadataKv {
             key,
             value_type: 4,
             value: MetaValue::U32(t.k as u32),
         });
-        let key = format!("spynaltap.svd.{}.shape", t.name);
+        let key = format!("tensorkit.svd.{}.shape", t.name);
         let elems = vec![
             MetaValue::F32(t.m as f32),
             MetaValue::F32(t.n as f32),

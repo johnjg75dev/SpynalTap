@@ -306,7 +306,7 @@ fn tiny_gguf_with_attn_q(path: &std::path::Path) {
 
 #[test]
 fn apply_to_gguf_writes_expected_structure() {
-    let tmp = std::env::temp_dir().join(format!("spynaltap-svd-{}.gguf", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("tensorkit-svd-{}.gguf", std::process::id()));
     tiny_gguf_with_attn_q(&tmp);
     let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
     let mut cfg = SvdConfig::default();
@@ -352,10 +352,10 @@ fn apply_to_gguf_writes_expected_structure() {
     // Metadata checks.
     assert_eq!(
         out_gg
-            .metadata_str("spynaltap.svd.applied")
+            .metadata_str("tensorkit.svd.applied")
             .map(|s| s == "true")
             .unwrap_or(false)
-            || out_gg.metadata_u32("spynaltap.svd.targets") == Some(1),
+            || out_gg.metadata_u32("tensorkit.svd.targets") == Some(1),
         true
     );
     let _ = std::fs::remove_file(&tmp);
@@ -364,7 +364,7 @@ fn apply_to_gguf_writes_expected_structure() {
 
 #[test]
 fn apply_to_gguf_preserves_non_targets() {
-    let tmp = std::env::temp_dir().join(format!("spynaltap-svd-keep-{}.gguf", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("tensorkit-svd-keep-{}.gguf", std::process::id()));
     tiny_gguf_with_attn_q(&tmp);
     let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
     let mut cfg = SvdConfig::default();

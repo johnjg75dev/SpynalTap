@@ -1,5 +1,5 @@
 //! Pipeline config + interactive wizard.
-//! Run `spynaltape interact` for the guided step-through UI.
+//! Run `tensorkit interact` for the guided step-through UI.
 
 use dialoguer::{Confirm, Input, Select};
 use serde::{Deserialize, Serialize};
@@ -653,7 +653,7 @@ fn execute_pipeline(cfg: &PipelineConfig) -> Result<(), crate::Error> {
 
 const BANNER: &str = r#"
 ╔══════════════════════════════════════════════╗
-║         SpynalTap Interactive Mode           ║
+║         TensorKit Interactive Mode           ║
 ║   Analyze · Prune · SVD · Quant · Merge · MoE ║
 ╚══════════════════════════════════════════════╝
 "#;

@@ -1,9 +1,9 @@
-# SpynalTap — AI Model Analyzer, Pruner, SVD Compressor, Quantizer & Merger
+# TensorKit — AI Model Analyzer, Pruner, SVD Compressor, Quantizer & Merger
 
-**`spynaltape`** is a fast, format-agnostic CLI and library for analyzing, pruning, SVD-compressing, quantizing, merging, and MoE-merging transformer-based AI models. It supports **GGUF** (v1–v3), **safetensors**, and **ONNX** formats.
+**`tensorkit`** is a fast, format-agnostic CLI and library for analyzing, pruning, SVD-compressing, quantizing, merging, and MoE-merging transformer-based AI models. It supports **GGUF** (v1–v3), **safetensors**, and **ONNX** formats.
 
 ```text
-spynaltape — these go to eleven.
+tensorkit — these go to eleven.
 ```
 
 ---
@@ -96,10 +96,10 @@ spynaltape — these go to eleven.
 ### From source
 
 ```bash
-git clone https://github.com/anomalyco/spynaltap.git
-cd spynaltap
+git clone https://github.com/anomalyco/tensorkit.git
+cd tensorkit
 cargo build --release
-./target/release/spynaltape --help
+./target/release/tensorkit --help
 ```
 
 ### Prerequisites
@@ -115,79 +115,79 @@ cargo build --release
 
 ```bash
 # Basic analysis
-spynaltape analyze model.gguf
+tensorkit analyze model.gguf
 
 # With HTML report + dry-run
-spynaltape analyze model.gguf --report report.html --dry-run
+tensorkit analyze model.gguf --report report.html --dry-run
 
 # JSON output
-spynaltape analyze model.safetensors --json | jq .
+tensorkit analyze model.safetensors --json | jq .
 ```
 
 ### 2. Prune blocks
 
 ```bash
 # Auto-prune 5 blocks
-spynaltape prune model.gguf --selection auto:5 --out pruned.gguf -y
+tensorkit prune model.gguf --selection auto:5 --out pruned.gguf -y
 
 # Keep specific blocks
-spynaltape prune model.gguf --selection keep:0,1,2,3,4 --out pruned.gguf --verify
+tensorkit prune model.gguf --selection keep:0,1,2,3,4 --out pruned.gguf --verify
 ```
 
 ### 3. SVD compress
 
 ```bash
 # Compress MLP tensors at 50% rank
-spynaltape svd model.gguf --layers all --tensors mlp --rank 0.5 --out compressed.gguf
+tensorkit svd model.gguf --layers all --tensors mlp --rank 0.5 --out compressed.gguf
 
 # Energy-based rank with adjacent tensors
-spynaltape svd model.gguf --layers all-attn --rank energy:0.99 --adjacent attn_v+1 --out compressed.gguf
+tensorkit svd model.gguf --layers all-attn --rank energy:0.99 --adjacent attn_v+1 --out compressed.gguf
 ```
 
 ### 4. Quantize
 
 ```bash
 # Quantize to Q4_K
-spynaltape quant model.gguf --target q4_k --out quantized.gguf -y
+tensorkit quant model.gguf --target q4_k --out quantized.gguf -y
 
 # Quantize to IQ2_S (extreme compression)
-spynaltape quant model.gguf --target iq2_s --out quantized.gguf -y
+tensorkit quant model.gguf --target iq2_s --out quantized.gguf -y
 ```
 
 ### 5. Merge models
 
 ```bash
 # Average two models
-spynaltape merge model_a.gguf --model-b model_b.gguf --out merged.gguf
+tensorkit merge model_a.gguf --model-b model_b.gguf --out merged.gguf
 
 # Slerp with t=0.3
-spynaltape merge model_a.gguf --model-b model_b.gguf --mode slerp:0.3 --out merged.gguf
+tensorkit merge model_a.gguf --model-b model_b.gguf --mode slerp:0.3 --out merged.gguf
 ```
 
 ### 6. Interactive pipeline
 
 ```bash
 # Launch the interactive wizard
-spynaltape interact
+tensorkit interact
 ```
 
 ### 7. Pipeline from JSON config
 
 ```bash
-spynaltape pipeline my-pipeline.json
+tensorkit pipeline my-pipeline.json
 ```
 
 ### 8. ONNX operations
 
 ```bash
 # Analyze
-spynaltape analyze model.onnx --json
+tensorkit analyze model.onnx --json
 
 # Prune blocks (write output as ONNX)
-spynaltape prune model.onnx --selection auto:3 --out pruned.onnx -y
+tensorkit prune model.onnx --selection auto:3 --out pruned.onnx -y
 
 # SVD compress (write output as ONNX)
-spynaltape svd model.onnx --layers all --tensors mlp --rank 0.5 --out compressed.onnx
+tensorkit svd model.onnx --layers all --tensors mlp --rank 0.5 --out compressed.onnx
 ```
 
 ---
@@ -197,7 +197,7 @@ spynaltape svd model.onnx --layers all --tensors mlp --rank 0.5 --out compressed
 ### `analyze`
 
 ```
-spynaltape analyze [OPTIONS] <MODEL>
+tensorkit analyze [OPTIONS] <MODEL>
 
 Arguments:
   <MODEL>  Path to the model file
@@ -220,7 +220,7 @@ Options:
 ### `prune`
 
 ```
-spynaltape prune [OPTIONS] <MODEL> --selection <SELECTION> --out <OUT>
+tensorkit prune [OPTIONS] <MODEL> --selection <SELECTION> --out <OUT>
 
 Options:
   --selection <SEL>  Selection grammar: auto:<N>, keep:<list>, drop:<list>, pattern:<regex>
@@ -240,7 +240,7 @@ Options:
 ### `svd`
 
 ```
-spynaltape svd [OPTIONS] <MODEL> --layers <LAYERS> --out <OUT>
+tensorkit svd [OPTIONS] <MODEL> --layers <LAYERS> --out <OUT>
 
 Options:
   --layers <LAYERS>    Layer selection: all, all-attn, all-ffn, 0-5,10, regex:^blk\.0\.
@@ -269,7 +269,7 @@ Options:
 ### `quant`
 
 ```
-spynaltape quant [OPTIONS] <MODEL> --target <TYPE> --out <OUT>
+tensorkit quant [OPTIONS] <MODEL> --target <TYPE> --out <OUT>
 
 Options:
   --target <TYPE>  Quantization type (see list below)
@@ -282,7 +282,7 @@ Options:
 ### `merge`
 
 ```
-spynaltape merge [OPTIONS] <MODEL_A> --out <OUT>
+tensorkit merge [OPTIONS] <MODEL_A> --out <OUT>
 
 Options:
   --model-b <PATH>   Second model (omit for same-file merge)
@@ -297,7 +297,7 @@ Options:
 ### `moe`
 
 ```
-spynaltape moe <MODEL> --out <OUT>
+tensorkit moe <MODEL> --out <OUT>
 
 Options:
   --strategy <S>    average or similarity:<k> [default: average]
@@ -310,7 +310,7 @@ Options:
 ### `pipeline`
 
 ```
-spynaltape pipeline <CONFIG>
+tensorkit pipeline <CONFIG>
 ```
 
 Runs a sequence of operations defined in a JSON pipeline config file. The output of each step becomes the input of the next.
@@ -331,7 +331,7 @@ Runs a sequence of operations defined in a JSON pipeline config file. The output
 ### `interact`
 
 ```
-spynaltape interact
+tensorkit interact
 ```
 
 Launches the interactive pipeline builder with a menu-driven interface. Supports all six operations with guided parameter input, step management (add/remove/reorder), save/load of config files, and approval-before-execution.
@@ -339,7 +339,7 @@ Launches the interactive pipeline builder with a menu-driven interface. Supports
 ### `bench`
 
 ```
-spynaltape bench [OPTIONS] [OP]
+tensorkit bench [OPTIONS] [OP]
 
 Arguments:
   [OP]  Operation to benchmark: analyze, svd, quant [default: analyze]
@@ -352,7 +352,7 @@ Options:
 ### `test`
 
 ```
-spynaltape test [CATEGORY]
+tensorkit test [CATEGORY]
 
 Arguments:
   [CATEGORY]  Test category: all, dequant, svd, quant [default: all]
@@ -447,7 +447,7 @@ Pipeline configs are JSON files that define a sequence of operations. Each step 
 
 ## Quantization Types
 
-SpynalTap supports 23 quantization types, mapped to the canonical GGML enum IDs used by `llama.cpp`:
+TensorKit supports 23 quantization types, mapped to the canonical GGML enum IDs used by `llama.cpp`:
 
 | Type | Enum Name | ID | Block Size | Description |
 |------|-----------|----|------------|-------------|
@@ -479,17 +479,17 @@ SpynalTap supports 23 quantization types, mapped to the canonical GGML enum IDs 
 
 ## Library API
 
-The `spynaltap` library crate provides the core functionality. Use it in your own Rust projects:
+The `tensorkit` library crate provides the core functionality. Use it in your own Rust projects:
 
 ```toml
 [dependencies]
-spynaltap = { git = "https://github.com/anomalyco/spynaltap.git" }
+tensorkit = { git = "https://github.com/anomalyco/tensorkit.git" }
 ```
 
 ### Basic usage
 
 ```rust
-use spynaltap::{Analyzer, formats::gguf::GgufFile, formats::onnx::OnnxFile};
+use tensorkit::{Analyzer, formats::gguf::GgufFile, formats::onnx::OnnxFile};
 
 // Analyze a GGUF model
 let model = GgufFile::open("model.gguf")?;
@@ -548,7 +548,7 @@ Input File (GGUF / Safetensors / ONNX)
 ### Module structure
 
 ```
-spynaltap/
+tensorkit/
 ├── lib/                          # Library crate
 │   ├── src/
 │   │   ├── analysis/             # Analyzer, scoring, stats, spectra
@@ -590,7 +590,7 @@ spynaltap/
 
 ### Comparison & Limitations
 
-| Feature | SpynalTap | llama.cpp | ONNX Runtime |
+| Feature | TensorKit | llama.cpp | ONNX Runtime |
 |---------|-----------|-----------|--------------|
 | Heuristic block scoring | ✅ | ❌ | ❌ |
 | SVD compression | ✅ | ❌ | ❌ |

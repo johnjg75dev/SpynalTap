@@ -531,13 +531,13 @@ fn run_e2e(target: GgmlType) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tid = format!("{:?}", std::thread::current().id());
     let tmp_in = std::env::temp_dir().join(format!(
-        "spynaltap-qz-in-{}-{}-{}.gguf",
+        "tensorkit-qz-in-{}-{}-{}.gguf",
         std::process::id(),
         tid,
         n
     ));
     let tmp_out = std::env::temp_dir().join(format!(
-        "spynaltap-qz-out-{}-{}-{}.gguf",
+        "tensorkit-qz-out-{}-{}-{}.gguf",
         std::process::id(),
         tid,
         n
@@ -617,7 +617,7 @@ fn run_e2e(target: GgmlType) {
     let applied = gg
         .metadata
         .iter()
-        .find(|kv| kv.key == "spynaltap.quantize.applied")
+        .find(|kv| kv.key == "tensorkit.quantize.applied")
         .expect("metadata: applied");
     match &applied.value {
         MetaValue::Bool(true) => {}
@@ -658,13 +658,13 @@ fn e2e_passthrough_keeps_dtypes() {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tid = format!("{:?}", std::thread::current().id());
     let tmp_in = std::env::temp_dir().join(format!(
-        "spynaltap-qz-pt-in-{}-{}-{}.gguf",
+        "tensorkit-qz-pt-in-{}-{}-{}.gguf",
         std::process::id(),
         tid,
         n
     ));
     let tmp_out = std::env::temp_dir().join(format!(
-        "spynaltap-qz-pt-out-{}-{}-{}.gguf",
+        "tensorkit-qz-pt-out-{}-{}-{}.gguf",
         std::process::id(),
         tid,
         n

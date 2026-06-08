@@ -1,4 +1,4 @@
-//! `spynaltape` — analyze, prune, SVD-compress, merge, quantize, and MoE-merge
+//! `tensorkit` — analyze, prune, SVD-compress, merge, quantize, and MoE-merge
 //! AI model files.
 //!
 //! Subcommands:
@@ -17,24 +17,24 @@ mod pipeline;
 
 use clap::{Parser, Subcommand};
 use regex::Regex;
-use spynaltap::formats::gguf::dequant as gguf_dequant;
-use spynaltap::formats::gguf::writer::GgufWriter;
-use spynaltap::formats::gguf::GgufFile;
-use spynaltap::formats::gguf::types::{dims_product, GgmlType, MetaValue, MetadataKv};
-use spynaltap::formats::onnx::OnnxFile;
-use spynaltap::formats::safetensors::SafetensorsFile;
-use spynaltap::merge::{slerp_tensors, MoEWeights, MoEMergeStrategy, merge_experts};
-use spynaltap::model::ModelFormat;
-use spynaltap::prune::{
+use tensorkit::formats::gguf::dequant as gguf_dequant;
+use tensorkit::formats::gguf::writer::GgufWriter;
+use tensorkit::formats::gguf::GgufFile;
+use tensorkit::formats::gguf::types::{dims_product, GgmlType, MetaValue, MetadataKv};
+use tensorkit::formats::onnx::OnnxFile;
+use tensorkit::formats::safetensors::SafetensorsFile;
+use tensorkit::merge::{slerp_tensors, MoEWeights, MoEMergeStrategy, merge_experts};
+use tensorkit::model::ModelFormat;
+use tensorkit::prune::{
     apply_to_gguf, apply_to_onnx, apply_to_safetensors, build_plan, parse_selection,
 };
-use spynaltap::quantize::apply::quantize_gguf as quantize_gguf_apply;
-use spynaltap::svd::{
+use tensorkit::quantize::apply::quantize_gguf as quantize_gguf_apply;
+use tensorkit::svd::{
     AdjacentSelection, LayerSelection, OutputDtype, RankSpecWithClamps, SvdConfig, TensorSelection,
     apply_to_gguf as svd_apply_gguf, apply_to_onnx as svd_apply_onnx, apply_to_safetensors as svd_apply_st,
     build_plan as build_svd_plan,
 };
-use spynaltap::{Analyzer, Error};
+use tensorkit::{Analyzer, Error};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,11 +42,11 @@ use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "spynaltape",
+    name = "tensorkit",
     version,
-    about = "spynaltape — these go to eleven.",
+    about = "tensorkit — these go to eleven.",
     long_about = "Analyze, prune, SVD-compress, merge, and quantize AI model files.\n\n\
-                  Run `spynaltape <command> --help` for command-specific options."
+                  Run `tensorkit <command> --help` for command-specific options."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -592,12 +592,12 @@ pub(crate) fn run_merge(
     }
     // Add merge metadata.
     writer.add_kv(MetadataKv {
-        key: "spynaltap.merge.source".into(),
+        key: "tensorkit.merge.source".into(),
         value_type: 8,
         value: MetaValue::String(models.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(", ")),
     });
     writer.add_kv(MetadataKv {
-        key: "spynaltap.merge.mode".into(),
+        key: "tensorkit.merge.mode".into(),
         value_type: 8,
         value: MetaValue::String(mode_desc.clone()),
     });
@@ -702,7 +702,7 @@ pub(crate) fn run_moe(model: &Path, strategy: &str, out: &Path, expert_pattern: 
         writer.add_kv(kv.clone());
     }
     writer.add_kv(MetadataKv {
-        key: "spynaltap.moe.strategy".into(),
+        key: "tensorkit.moe.strategy".into(),
         value_type: 8,
         value: MetaValue::String(strategy.into()),
     });
@@ -844,7 +844,7 @@ fn confirm_or_exit(action: &str, out: &Path, yes: bool) -> Result<(), Error> {
     }
 }
 
-fn print_human_report<M: spynaltap::Model + ?Sized>(m: &M, a: &spynaltap::Analysis) {
+fn print_human_report<M: tensorkit::Model + ?Sized>(m: &M, a: &tensorkit::Analysis) {
     let total_bytes: u64 = m.tensors().iter().map(|t| t.byte_size).sum();
     println!("\n=== model summary ===");
     if let Some(n) = m.name() { println!("  model.name:     {n}"); }
@@ -866,7 +866,7 @@ fn print_human_report<M: spynaltap::Model + ?Sized>(m: &M, a: &spynaltap::Analys
     println!("  auto-prune {} blocks: {:?}", a.recommendation_count, a.recommendation);
 }
 
-fn print_prune_report(r: &spynaltap::PruneReport) {
+fn print_prune_report(r: &tensorkit::PruneReport) {
     println!("\n=== prune report ===");
     println!("  bytes:   {} -> {} ({:.2} MB saved)", r.bytes_in, r.bytes_out, (r.bytes_in as f64 - r.bytes_out as f64) / 1_048_576.0);
     println!("  tensors: kept={} dropped={}", r.tensors_kept, r.tensors_dropped);
@@ -874,7 +874,7 @@ fn print_prune_report(r: &spynaltap::PruneReport) {
     println!("  output:  {}", r.output_path);
 }
 
-fn print_svd_plan_summary(plan: &spynaltap::SvdPlan) {
+fn print_svd_plan_summary(plan: &tensorkit::SvdPlan) {
     eprintln!("\n[SVD plan]");
     eprintln!("  blocks:           {}", plan.original_block_count);
     eprintln!("  targets:          {}", plan.targets.len());
@@ -884,7 +884,7 @@ fn print_svd_plan_summary(plan: &spynaltap::SvdPlan) {
     eprintln!("  est. compression: {:.1}%", plan.compression_ratio() * 100.0);
 }
 
-fn print_svd_report(r: &spynaltap::SvdReport) {
+fn print_svd_report(r: &tensorkit::SvdReport) {
     println!("\n=== SVD report ===");
     println!("  output:       {}", r.output_path);
     println!("  file size:    {} -> {} bytes ({:.2} MB -> {:.2} MB)", r.bytes_in, r.bytes_out, r.bytes_in as f64 / 1_048_576.0, r.bytes_out as f64 / 1_048_576.0);
@@ -893,7 +893,7 @@ fn print_svd_report(r: &spynaltap::SvdReport) {
     println!("  skipped:      {}", r.skipped.len());
 }
 
-fn print_quant_report(r: &spynaltap::quantize::apply::QuantizeReport) {
+fn print_quant_report(r: &tensorkit::quantize::apply::QuantizeReport) {
     println!("\n=== quantize report ===");
     println!("  output:       {}", r.output_path);
     println!("  target:       {}", r.target);
@@ -902,8 +902,8 @@ fn print_quant_report(r: &spynaltap::quantize::apply::QuantizeReport) {
     println!("  compression:  {:.1}%", r.compression_ratio * 100.0);
 }
 
-fn verify_gguf(path: &Path, plan: &spynaltap::PrunePlan) -> Result<(), Error> {
-    use spynaltap::formats::gguf::verify;
+fn verify_gguf(path: &Path, plan: &tensorkit::PrunePlan) -> Result<(), Error> {
+    use tensorkit::formats::gguf::verify;
     let kept: Vec<String> = plan.keep.iter().filter(|(_, k)| *k).map(|(n, _)| n.clone()).collect();
     let r = verify::verify(path, &kept)?;
     println!("\n=== verify ===");
@@ -915,7 +915,7 @@ fn verify_gguf(path: &Path, plan: &spynaltap::PrunePlan) -> Result<(), Error> {
     Ok(())
 }
 
-fn print_dry_run_analysis(analysis: &spynaltap::Analysis) {
+fn print_dry_run_analysis(analysis: &tensorkit::Analysis) {
     println!("\n=== DRY RUN: Expected Impact ===");
     let total_mb = analysis.total_bytes as f64 / 1_048_576.0;
     println!("  model size:    {:.2} MB", total_mb);
@@ -979,8 +979,8 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
     }
 }
 
-fn write_html_report(analysis: &spynaltap::Analysis, path: &Path, template_path: Option<&Path>) -> Result<(), Error> {
-    let html = spynaltap::render_html_report(analysis, template_path)
+fn write_html_report(analysis: &tensorkit::Analysis, path: &Path, template_path: Option<&Path>) -> Result<(), Error> {
+    let html = tensorkit::render_html_report(analysis, template_path)
         .map_err(|e| Error::Gguf(format!("report generation failed: {e}")))?;
     std::fs::write(path, html).map_err(Error::Io)?;
     Ok(())

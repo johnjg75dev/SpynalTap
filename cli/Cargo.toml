@@ -1,12 +1,12 @@
 [package]
-name        = "spynaltape"
+name        = "tensorkit-cli"
 version     = "0.1.3"
 edition     = "2024"
-description = "CLI for spynaltap: analyze, prune, and SVD-compress AI model files."
+description = "CLI for TensorKit: analyze, prune, and SVD-compress AI model files."
 license     = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "spynaltape"
+name = "tensorkit"
 path = "src/main.rs"
 
 [dependencies]
@@ -14,7 +14,7 @@ path = "src/main.rs"
 clap = { version = "4.6.1", features = ["derive"] }
 
 # Core library this binary is a thin wrapper around.
-spynaltap = { path = "../lib" }
+tensorkit = { path = "../lib" }
 
 # Output (used until we write our own faster serializer)
 serde      = { version = "1.0.228", features = ["derive"] }

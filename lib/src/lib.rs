@@ -1,4 +1,4 @@
-//! `spynaltap` — fast AI model analyzer and transformer-block pruner.
+//! `tensorkit` — fast AI model analyzer and transformer-block pruner.
 //!
 //! Supports GGUF (v1–v3), safetensors, and ONNX. Per-block "removability"
 //! is scored heuristically by default; the `calibrate` feature uses `candle`
@@ -6,15 +6,15 @@
 //!
 //! Quick start:
 //! ```no_run
-//! use spynaltap::{Analyzer, formats::gguf::GgufFile};
+//! use tensorkit::{Analyzer, formats::gguf::GgufFile};
 //!
 //! let model = GgufFile::open("model.gguf")?;
 //! let analysis = Analyzer::with_sample_per_tensor(200_000).analyze(&model)?;
 //! println!("recommended: {:?}", analysis.recommendation);
-//! # Ok::<(), spynaltap::Error>(())
+//! # Ok::<(), tensorkit::Error>(())
 //! ```
 //!
-//! The CLI binary is `spynaltape`.
+//! The CLI binary is `tensorkit`.
 
 #![allow(clippy::needless_range_loop)]
 

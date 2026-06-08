@@ -449,7 +449,7 @@ impl OnnxWriter {
     pub fn new() -> Self {
         Self {
             ir_version: 9,
-            producer_name: "spynaltap".into(),
+            producer_name: "tensorkit".into(),
             producer_version: "0.1".into(),
             graph_name: "graph".into(),
             metadata: Vec::new(),

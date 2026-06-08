@@ -6,8 +6,8 @@
 //!
 //! Quick start:
 //! ```no_run
-//! use spynaltap::formats::gguf::GgufFile;
-//! use spynaltap::svd::{build_plan, apply_to_gguf, OutputDtype, SvdConfig, LayerSelection, TensorSelection, RankSpec, RankSpecWithClamps, RankClamps};
+//! use tensorkit::formats::gguf::GgufFile;
+//! use tensorkit::svd::{build_plan, apply_to_gguf, OutputDtype, SvdConfig, LayerSelection, TensorSelection, RankSpec, RankSpecWithClamps, RankClamps};
 //!
 //! let gg = GgufFile::open("model.gguf")?;
 //! let cfg = SvdConfig {
@@ -22,7 +22,7 @@
 //! println!("compressed {:.1}% of {:.2} MB target bytes",
 //!          report.compression_ratio * 100.0,
 //!          report.orig_tensor_bytes as f64 / 1_048_576.0);
-//! # Ok::<(), spynaltap::Error>(())
+//! # Ok::<(), tensorkit::Error>(())
 //! ```
 
 pub mod apply;

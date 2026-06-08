@@ -1,4 +1,4 @@
-﻿//! HTML report generation from analysis data.
+//! HTML report generation from analysis data.
 //!
 //! Renders `Analysis` to an interactive HTML report using the built-in
 //! template with Chart.js for interactive charts.
@@ -37,7 +37,7 @@ pub fn render_html_report(
     };
     let est_after_mb = analysis.estimated_bytes_after_prune as f64 / 1_048_576.0;
 
-    html = html.replace("{{TITLE}}", "SpynalTap Analysis Report");
+    html = html.replace("{{TITLE}}", "TensorKit Analysis Report");
     html = html.replace("{{DATE}}", &chrono_lite_date());
     html = html.replace("{{MODEL_NAME}}", model_name);
     html = html.replace("{{ARCHITECTURE}}", arch);

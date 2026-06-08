@@ -4,8 +4,8 @@
 //! Add `RUSTFLAGS=-Ctarget-cpu=native` for peak numbers on your machine.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use spynaltap::formats::gguf::dequant as gguf_dequant;
-use spynaltap::formats::gguf::types::GgmlType;
+use tensorkit::formats::gguf::dequant as gguf_dequant;
+use tensorkit::formats::gguf::types::GgmlType;
 
 fn bench_dequant_f16(c: &mut Criterion) {
     let bytes: Vec<u8> = (0..(1 << 20))

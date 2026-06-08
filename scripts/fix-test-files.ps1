@@ -2,7 +2,7 @@
 # because #[path] declaration already creates the tests module.
 # Then unindent contents by 4 spaces.
 
-$testsDir = "C:\Users\John\Desktop\AI Gens\Rust\SpynalTap\lib\tests\unit"
+$testsDir = "C:\Users\John\Desktop\AI Gens\Rust\TensorKit\lib\tests\unit"
 $fixed = 0
 $skipped = 0
 

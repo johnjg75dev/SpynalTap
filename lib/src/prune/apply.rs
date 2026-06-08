@@ -6,7 +6,7 @@
 //!   shrunk by removing elements at the dropped block indices.
 //! - Per-block metadata keys (`{arch}.blk.{N}.*`) are removed for dropped
 //!   blocks and re-indexed for kept blocks.
-//! - `spynaltap.prune.*` traceability metadata is written.
+//! - `tensorkit.prune.*` traceability metadata is written.
 
 use crate::error::{Error, Result};
 use crate::formats::gguf::reader::GgufFile;
@@ -213,7 +213,7 @@ pub fn apply_to_gguf(gg: &GgufFile, plan: &PrunePlan, dst: &Path) -> Result<Prun
     for (k, v) in trace_kvs {
         let vt = gguf_value_type(&v);
         writer.add_kv(crate::formats::gguf::types::MetadataKv {
-            key: format!("spynaltap.prune.{k}"),
+            key: format!("tensorkit.prune.{k}"),
             value_type: vt,
             value: v,
         });
@@ -280,31 +280,31 @@ pub fn apply_to_safetensors(
         .map(|i| i.to_string())
         .collect();
     writer.set_metadata(
-        "spynaltap.prune.dropped_blocks",
+        "tensorkit.prune.dropped_blocks",
         serde_json::Value::String(drop_str.join(",")),
     );
     writer.set_metadata(
-        "spynaltap.prune.original_block_count",
+        "tensorkit.prune.original_block_count",
         serde_json::json!(plan.original_block_count),
     );
     writer.set_metadata(
-        "spynaltap.prune.new_block_count",
+        "tensorkit.prune.new_block_count",
         serde_json::json!(plan.new_block_count),
     );
     writer.set_metadata(
-        "spynaltap.prune.method",
+        "tensorkit.prune.method",
         serde_json::Value::String("prune".into()),
     );
     writer.set_metadata(
-        "spynaltap.prune.timestamp",
+        "tensorkit.prune.timestamp",
         serde_json::Value::String(chrono_now_for_metadata()),
     );
 
     let kept = plan.keep.iter().filter(|(_, k)| *k).count();
     let dropped = plan.keep.len() - kept;
-    writer.set_metadata("spynaltap.prune.tensors_kept", serde_json::json!(kept));
+    writer.set_metadata("tensorkit.prune.tensors_kept", serde_json::json!(kept));
     writer.set_metadata(
-        "spynaltap.prune.tensors_dropped",
+        "tensorkit.prune.tensors_dropped",
         serde_json::json!(dropped),
     );
 
@@ -375,16 +375,16 @@ pub fn apply_to_onnx(onnx: &OnnxFile, plan: &PrunePlan, dst: &Path) -> Result<Pr
         .iter()
         .map(|i| i.to_string())
         .collect();
-    writer.add_metadata("spynaltap.prune.dropped_blocks", &drop_str.join(","));
+    writer.add_metadata("tensorkit.prune.dropped_blocks", &drop_str.join(","));
     writer.add_metadata(
-        "spynaltap.prune.original_block_count",
+        "tensorkit.prune.original_block_count",
         &plan.original_block_count.to_string(),
     );
     writer.add_metadata(
-        "spynaltap.prune.new_block_count",
+        "tensorkit.prune.new_block_count",
         &plan.new_block_count.to_string(),
     );
-    writer.add_metadata("spynaltap.prune.method", "prune");
+    writer.add_metadata("tensorkit.prune.method", "prune");
 
     let mut kept_count = 0usize;
     let mut dropped_count = 0usize;

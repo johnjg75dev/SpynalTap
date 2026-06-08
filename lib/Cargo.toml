@@ -1,12 +1,12 @@
 [package]
-name        = "spynaltap"
+name        = "tensorkit"
 version     = "0.1.3"
 edition     = "2024"
 description = "Fast AI model analyzer and transformer-block pruner (GGUF, safetensors)."
 license     = "MIT OR Apache-2.0"
 
 [lib]
-name = "spynaltap"
+name = "tensorkit"
 path = "src/lib.rs"
 # crate-type=["cdylib", "rlib"]
 crate-type = ["rlib"]

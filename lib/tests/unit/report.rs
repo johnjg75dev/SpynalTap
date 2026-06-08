@@ -20,7 +20,7 @@ fn test_render_minimal() {
     let analysis = empty_analysis();
     let html = render_html_report(&analysis, None).unwrap();
     assert!(html.contains("<!DOCTYPE html>"));
-    assert!(html.contains("SpynalTap"));
+    assert!(html.contains("TensorKit"));
     assert!(html.contains("chart.js"));
     assert!(html.contains("CHART_DATA"));
 }

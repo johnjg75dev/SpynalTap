@@ -1,5 +1,5 @@
-use spynaltap::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
-use spynaltap::formats::gguf::writer::GgufWriter;
+use tensorkit::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
+use tensorkit::formats::gguf::writer::GgufWriter;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -31,13 +31,13 @@ fn make_test_gguf(path: &PathBuf) {
 #[test]
 fn cli_quantize_q4_0_smoke() {
     let in_path =
-        std::env::temp_dir().join(format!("spynaltap-cli-in-{}.gguf", std::process::id()));
+        std::env::temp_dir().join(format!("tensorkit-cli-in-{}.gguf", std::process::id()));
     let out_path =
-        std::env::temp_dir().join(format!("spynaltap-cli-out-{}.gguf", std::process::id()));
+        std::env::temp_dir().join(format!("tensorkit-cli-out-{}.gguf", std::process::id()));
     make_test_gguf(&in_path);
 
-    let exe = std::env::var("CARGO_BIN_EXE_spynaltape")
-        .unwrap_or_else(|_| "target/debug/spynaltape".to_string());
+    let exe = std::env::var("CARGO_BIN_EXE_tensorkit")
+        .unwrap_or_else(|_| "target/debug/tensorkit".to_string());
     let out = Command::new(&exe)
         .arg(&in_path)
         .arg("--quantize")
@@ -47,7 +47,7 @@ fn cli_quantize_q4_0_smoke() {
         .arg("--yes")
         .arg("--json")
         .output()
-        .expect("run spynaltape");
+        .expect("run tensorkit");
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -61,7 +61,7 @@ fn cli_quantize_q4_0_smoke() {
     );
 
     // Verify the output file is a valid GGUF with the right dtype.
-    let gg = spynaltap::formats::gguf::GgufFile::open(&out_path).expect("reopen");
+    let gg = tensorkit::formats::gguf::GgufFile::open(&out_path).expect("reopen");
     let ti = gg
         .tensors
         .iter()

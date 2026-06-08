@@ -1,4 +1,4 @@
-﻿//! SVG chart and HTML report rendering for `Analysis`.
+//! SVG chart and HTML report rendering for `Analysis`.
 //!
 //! Pure-string builders; no external SVG / HTML library. The output is
 //! self-contained HTML5 with embedded SVG; opening the file in a browser
@@ -378,7 +378,7 @@ pub fn analysis_to_html(analysis: &Analysis) -> String {
     };
 
     let charts = analysis_to_charts(analysis);
-    render_html("spynaltap analysis report", &[section, section2], &charts)
+    render_html("tensorkit analysis report", &[section, section2], &charts)
 }
 
 fn escape_text(s: &str) -> String {

@@ -6,7 +6,7 @@
 //!     dtype for non-quantized types) and re-quantize to the target type.
 //!
 //! The output is written to `dst`, preserving the source file's GGUF version
-//! and alignment, and adding a small set of `spynaltap.quantize.*` metadata
+//! and alignment, and adding a small set of `tensorkit.quantize.*` metadata
 //! entries for traceability.
 
 use crate::error::{Error, Result};
@@ -165,17 +165,17 @@ pub fn quantize_gguf(src: &Path, target: GgmlType, dst: &Path) -> Result<Quantiz
 fn build_meta(target: GgmlType) -> Vec<MetadataKv> {
     vec![
         MetadataKv {
-            key: "spynaltap.quantize.applied".into(),
+            key: "tensorkit.quantize.applied".into(),
             value_type: 7, // GGUF value type for Bool
             value: MetaValue::Bool(true),
         },
         MetadataKv {
-            key: "spynaltap.quantize.target".into(),
+            key: "tensorkit.quantize.target".into(),
             value_type: 8, // GGUF value type for String
             value: MetaValue::String(target.as_str().into()),
         },
         MetadataKv {
-            key: "spynaltap.quantize.method".into(),
+            key: "tensorkit.quantize.method".into(),
             value_type: 8,
             value: MetaValue::String("simple-per-block".into()),
         },
