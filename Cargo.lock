@@ -2368,6 +2368,7 @@ name = "spynaltape"
 version = "0.1.3"
 dependencies = [
  "clap",
+ "regex",
  "serde",
  "serde_json",
  "spynaltap",

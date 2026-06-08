@@ -693,7 +693,8 @@ pub fn dequant_iq3_xxs(bytes: &[u8]) -> Vec<f32> {
 
 // -- IQ3_S (256 elements/block) --------------------------------------------
 
-/// IQ3_S block layout: 2 d (f16), 1 hmask[32], 32 qs, 32 signs, 4 scales = 110 bytes.
+/// IQ3_S block layout: 2 d (f16), 64 qs, 8 qh, 32 signs, 4 scales = 110 bytes.
+/// Matches ggml-common.h block_iq3_s (d, qs, qh, signs, scales).
 #[inline]
 pub fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
     const BLOCK_SIZE: usize = 110;
@@ -701,17 +702,17 @@ pub fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(n_blocks * QK_K);
     for blk in bytes.chunks_exact(BLOCK_SIZE) {
         let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-        let qh = &blk[2..34];
-        let qs = &blk[34..98];
-        let signs = &blk[98..102]; // 32 bytes
-        let scales = &blk[102..110];
+        let qs = &blk[2..66];
+        let qh = &blk[66..74];
+        let signs = &blk[74..106];
+        let scales = &blk[106..110];
         for ib32 in (0..8).step_by(2) {
             let db1 = d * (1.0 + 2.0 * (scales[ib32 / 2] & 0x0F) as f32);
             let db2 = d * (1.0 + 2.0 * (scales[ib32 / 2] >> 4) as f32);
             for l in 0..4 {
-                let g1 = (qs[ib32 * 4 + 2 * l] as usize)
+                let g1 = (qs[ib32 * 8 + 2 * l] as usize)
                     | (((qh[ib32] as u16) << (8 - 2 * l) & 0x100) as usize);
-                let g2 = (qs[ib32 * 4 + 2 * l + 1] as usize)
+                let g2 = (qs[ib32 * 8 + 2 * l + 1] as usize)
                     | (((qh[ib32] as u16) << (7 - 2 * l) & 0x100) as usize);
                 let grid1 = unsafe {
                     std::slice::from_raw_parts(
@@ -734,9 +735,9 @@ pub fn dequant_iq3_s(bytes: &[u8]) -> Vec<f32> {
                 }
             }
             for l in 0..4 {
-                let g1 = (qs[(ib32 + 1) * 4 + 2 * l] as usize)
+                let g1 = (qs[(ib32 + 1) * 8 + 2 * l] as usize)
                     | (((qh[ib32 + 1] as u16) << (8 - 2 * l) & 0x100) as usize);
-                let g2 = (qs[(ib32 + 1) * 4 + 2 * l + 1] as usize)
+                let g2 = (qs[(ib32 + 1) * 8 + 2 * l + 1] as usize)
                     | (((qh[ib32 + 1] as u16) << (7 - 2 * l) & 0x100) as usize);
                 let grid1 = unsafe {
                     std::slice::from_raw_parts(

@@ -1,18 +1,24 @@
-//! `spynaltape` — analyze, prune, SVD-compress, merge, and quantize AI model files.
+//! `spynaltape` — analyze, prune, SVD-compress, merge, quantize, and MoE-merge
+//! AI model files.
 //!
 //! Subcommands:
 //! - `analyze` — run heuristic analysis, print recommendation
 //! - `prune` — remove specified blocks/layers
 //! - `svd` — SVD-compress specified tensors
 //! - `quant` — quantize model to specified GGML type
-//! - `merge` — merge two models (average, slerp, moe)
+//! - `merge` — merge N models (weighted average, slerp)
+//! - `moe` — auto-detect experts, merge or purge experts
 //! - `bench` — benchmark operations
 //! - `test` — run self-tests
 
 use clap::{Parser, Subcommand};
+use regex::Regex;
+use spynaltap::formats::gguf::dequant as gguf_dequant;
+use spynaltap::formats::gguf::writer::GgufWriter;
 use spynaltap::formats::gguf::GgufFile;
-use spynaltap::formats::gguf::types::GgmlType;
+use spynaltap::formats::gguf::types::{dims_product, GgmlType, MetaValue, MetadataKv};
 use spynaltap::formats::safetensors::SafetensorsFile;
+use spynaltap::merge::{slerp_tensors, MoEWeights, MoEMergeStrategy, merge_experts};
 use spynaltap::model::ModelFormat;
 use spynaltap::prune::{
     apply_to_gguf, apply_to_safetensors, build_plan, parse_selection,
@@ -24,6 +30,7 @@ use spynaltap::svd::{
     build_plan as build_svd_plan,
 };
 use spynaltap::{Analyzer, Error};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -147,22 +154,52 @@ enum Commands {
         yes: bool,
     },
 
-    /// Merge two models
+    /// Merge N models (weighted). Same-file merge when only model_a is given.
     Merge {
-        /// Path to model A
+        /// Path to first model (required)
         model_a: PathBuf,
 
-        /// Path to model B
+        /// Path to second model (omit for same-file merge)
         #[arg(long)]
-        model_b: PathBuf,
+        model_b: Option<PathBuf>,
 
-        /// Merge mode: "average", "slerp:<t>", "moe:<strategy>:<k>"
-        #[arg(long)]
+        /// Merge mode: "average" or "slerp:<t>"
+        #[arg(long, default_value = "average")]
         mode: String,
+
+        /// Comma-separated weights (e.g., "0.5,0.3,0.2"; default: equal)
+        #[arg(long)]
+        weights: Option<String>,
+
+        /// JSON config file (overrides --mode, --weights)
+        #[arg(long)]
+        config: Option<PathBuf>,
 
         /// Output path
         #[arg(long, short = 'o')]
         out: PathBuf,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Auto-detect MoE experts, merge or purge
+    Moe {
+        /// Path to model
+        model: PathBuf,
+
+        /// Strategy: "average" or "similarity:k"
+        #[arg(long, default_value = "average")]
+        strategy: String,
+
+        /// Output path
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+
+        /// Expert tensor name pattern override (regex, default: auto-detect)
+        #[arg(long)]
+        expert_pattern: Option<String>,
 
         /// Skip confirmation prompt
         #[arg(long, short = 'y')]
@@ -217,8 +254,11 @@ fn run(cli: Cli) -> Result<(), Error> {
         Commands::Quant { model, target, out, blocks, yes } => {
             run_quant(&model, &target, &out, &blocks, yes)
         }
-        Commands::Merge { model_a, model_b, mode, out, yes } => {
-            run_merge(&model_a, &model_b, &mode, &out, yes)
+        Commands::Merge { model_a, model_b, mode, weights, config, out, yes } => {
+            run_merge(&model_a, model_b.as_ref().map(|v| &**v), &mode, weights.as_deref(), config.as_ref().map(|v| &**v), &out, yes)
+        }
+        Commands::Moe { model, strategy, out, expert_pattern, yes } => {
+            run_moe(&model, &strategy, &out, expert_pattern.as_deref(), yes)
         }
         Commands::Bench { op, model, iterations } => {
             run_bench(&op, model.as_ref().map(|v| &**v), iterations)
@@ -363,11 +403,306 @@ fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: &str, yes: 
     Ok(())
 }
 
-fn run_merge(model_a: &Path, model_b: &Path, mode: &str, out: &Path, yes: bool) -> Result<(), Error> {
-    // TODO: implement merge
-    eprintln!("[merge] {} + {} -> {} (mode: {})", model_a.display(), model_b.display(), out.display(), mode);
-    confirm_or_exit(&format!("merge ({})", mode), out, yes)?;
-    Err(Error::Gguf("merge not yet implemented".into()))
+fn run_merge(
+    model_a: &Path, model_b: Option<&Path>, mode: &str,
+    weights_str: Option<&str>, config_path: Option<&Path>,
+    out: &Path, yes: bool,
+) -> Result<(), Error> {
+    // Collect models.
+    let models: Vec<&Path> = if let Some(mb) = model_b {
+        vec![model_a, mb]
+    } else {
+        vec![model_a]
+    };
+    let n = models.len();
+
+    // Parse config / weights / mode.
+    let (_, per_model_weights) = if let Some(cfg) = config_path {
+        let text = std::fs::read_to_string(cfg).map_err(Error::Io)?;
+        let cfg: MergeConfig = serde_json::from_str(&text)
+            .map_err(|e| Error::Gguf(format!("merge config: {e}")))?;
+        (cfg.strategy.clone(), cfg.weights)
+    } else {
+        let mode = mode.to_string();
+        let weights: Option<Vec<f64>> = weights_str.map(|s| {
+            s.split(',')
+                .map(|w| w.trim().parse::<f64>().map_err(|_| Error::Gguf(format!("bad weight '{w}'"))))
+                .collect::<Result<Vec<_>, _>>()
+        }).transpose()?;
+        (mode, weights)
+    };
+
+    let weights: Vec<f64> = per_model_weights.unwrap_or_else(|| {
+        let w = 1.0 / n as f64;
+        vec![w; n]
+    });
+    if weights.len() != n {
+        return Err(Error::Gguf(format!(
+            "expected {n} weights but got {}", weights.len()
+        )));
+    }
+    let weight_sum: f64 = weights.iter().sum();
+    if weight_sum.abs() < 1e-12 {
+        return Err(Error::Gguf("sum of weights is zero".into()));
+    }
+    let weights: Vec<f32> = weights.into_iter().map(|w| (w / weight_sum) as f32).collect();
+
+    let slerp_t = if let Some(rest) = mode.strip_prefix("slerp:") {
+        Some(rest.parse::<f32>()
+            .map_err(|_| Error::Gguf(format!("bad slerp t: '{rest}'")))?)
+    } else if mode == "average" { None } else {
+        return Err(Error::Gguf(format!("unknown merge mode '{mode}' (use 'average' or 'slerp:<t>')")));
+    };
+
+    // Open all models.
+    let mut ggs: Vec<GgufFile> = Vec::with_capacity(n);
+    for &p in &models {
+        eprintln!("[open] {}", p.display());
+        ggs.push(GgufFile::open(p)?);
+    }
+
+    // Verify tensor count match for cross-file merge.
+    if n > 1 {
+        let ref_count = ggs[0].tensors.len();
+        for (i, gg) in ggs.iter().enumerate().skip(1) {
+            if gg.tensors.len() != ref_count {
+                return Err(Error::Gguf(format!(
+                    "model {} has {} tensors, expected {}", i + 1, gg.tensors.len(), ref_count
+                )));
+            }
+        }
+    }
+
+    let writer_version = ggs[0].version;
+    let writer_alignment = ggs[0].alignment;
+
+    // For same-file merge (n==1), operate on the single model's tensors
+    // (pairs of tensors within the same file). This only makes sense
+    // for MoE-style merging; for now just copy.
+    if n == 1 {
+        // Same-file merge: copy all tensors verbatim (no-op).
+        eprintln!("[merge] single-file mode: copying tensors");
+        let gg = &ggs[0];
+        let mut writer = GgufWriter::new(writer_version, writer_alignment);
+        for kv in &gg.metadata {
+            writer.add_kv(kv.clone());
+        }
+        for ti in &gg.tensors {
+            let src = gg.tensor_slice(ti).unwrap_or_default();
+            writer.add_tensor(ti.name.clone(), ti.n_dims, ti.dims, ti.ggml_type, src);
+        }
+        confirm_or_exit("merge (same-file copy)", out, yes)?;
+        let out_bytes = writer.into_bytes()?;
+        let mut f = std::fs::File::create(out)?;
+        f.write_all(&out_bytes)?;
+        return Ok(());
+    }
+
+    // Cross-file merge: iterate tensors in parallel.
+    let mode_desc = slerp_t.map(|t| format!("slerp({t})")).unwrap_or_else(|| "average".into());
+    let weight_desc: Vec<String> = weights.iter().map(|w| format!("{:.3}", w)).collect();
+    confirm_or_exit(
+        &format!("merge {} models ({}) weights={}", n, mode_desc, weight_desc.join(",")),
+        out, yes,
+    )?;
+
+    let ref_gg = &ggs[0];
+    let mut writer = GgufWriter::new(writer_version, writer_alignment);
+    for kv in &ref_gg.metadata {
+        writer.add_kv(kv.clone());
+    }
+    // Add merge metadata.
+    writer.add_kv(MetadataKv {
+        key: "spynaltap.merge.source".into(),
+        value_type: 8,
+        value: MetaValue::String(models.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(", ")),
+    });
+    writer.add_kv(MetadataKv {
+        key: "spynaltap.merge.mode".into(),
+        value_type: 8,
+        value: MetaValue::String(mode_desc.clone()),
+    });
+
+    for (ti_ref, ti_other) in ref_gg.tensors.iter().zip(ggs[1].tensors.iter()) {
+        if ti_ref.name != ti_other.name {
+            return Err(Error::Gguf(format!(
+                "tensor name mismatch: '{}' vs '{}'", ti_ref.name, ti_other.name
+            )));
+        }
+        let name = &ti_ref.name;
+        // Dequantize both tensors.
+        let a_bytes = ref_gg.tensor_slice(ti_ref).unwrap_or_default();
+        let b_bytes = ggs[1].tensor_slice(ti_other).unwrap_or_default();
+        let deq_a = gguf_dequant::dequantize(ti_ref.ggml_type, a_bytes, None)
+            .unwrap_or_else(|| a_bytes.iter().map(|&b| b as f32).collect());
+        let deq_b = gguf_dequant::dequantize(ti_other.ggml_type, b_bytes, None)
+            .unwrap_or_else(|| b_bytes.iter().map(|&b| b as f32).collect());
+
+        if deq_a.len() != deq_b.len() {
+            return Err(Error::Gguf(format!(
+                "tensor '{name}' length mismatch: {} vs {}", deq_a.len(), deq_b.len()
+            )));
+        }
+
+        let merged = if let Some(t) = slerp_t {
+            slerp_tensors(&deq_a, &deq_b, t)
+        } else {
+            // Weighted average.
+            let wa = weights[0];
+            let wb = weights[1];
+            deq_a.iter().zip(&deq_b).map(|(a, b)| a * wa + b * wb).collect()
+        };
+
+        // Keep output in the first model's quant type.
+        let out_ty = if ti_ref.ggml_type.block_size() > 1 {
+            GgmlType::F32  // Write merged tensors as F32
+        } else {
+            ti_ref.ggml_type
+        };
+        let out_bytes: Vec<u8> = if out_ty == ti_ref.ggml_type && ti_ref.ggml_type.block_size() == 1 {
+            // Non-quantized: store F32 directly.
+            merged.iter().flat_map(|v| v.to_le_bytes()).collect()
+        } else {
+            merged.iter().flat_map(|v| v.to_le_bytes()).collect()
+        };
+
+        let out_ty = GgmlType::F32;
+        writer.add_tensor(ti_ref.name.clone(), ti_ref.n_dims, ti_ref.dims, out_ty, &out_bytes);
+        eprintln!("  merged {}", ti_ref.name);
+    }
+
+    let out_bytes = writer.into_bytes()?;
+    let mut f = std::fs::File::create(out)?;
+    f.write_all(&out_bytes)?;
+    eprintln!("[merge] wrote {}", out.display());
+    Ok(())
+}
+
+fn run_moe(model: &Path, strategy: &str, out: &Path, expert_pattern: Option<&str>, yes: bool) -> Result<(), Error> {
+    eprintln!("[open] {}", model.display());
+    let gg = GgufFile::open(model)?;
+
+    // Auto-detect experts or use pattern override.
+    let pat = expert_pattern.map(|s| s.to_string()).unwrap_or_else(|| {
+        // Common MoE tensor patterns.
+        r"(ffn_gate|ffn_up|ffn_down)_exp[s]?\d*|experts?\.\d+\.|moe\.\w+"
+            .to_string()
+    });
+    let re = Regex::new(&pat)
+        .map_err(|e| Error::Gguf(format!("bad expert pattern '{pat}': {e}")))?;
+
+    // Detect: group tensors by the part before the expert index suffix.
+    // For each matched tensor, extract the base name and expert index.
+    // Strategy: find groups of 4+ tensors matching a pattern with a numeric index.
+    let mut seen: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Simple heuristic: group tensors ending in _exp0, _exp1, etc.
+    let group_re = Regex::new(r"^(.*_exp[s]?)(\d+)$")
+        .map_err(|e| Error::Gguf(format!("internal: {e}")))?;
+
+    for t in &gg.tensors {
+        let name = &t.name;
+        if let Some(caps) = group_re.captures(name) {
+            let base = caps[1].to_string();
+            seen.entry(base).or_default().push(name.clone());
+        } else if re.is_match(name) {
+            // Non-grouped expert pattern matched.
+        }
+    }
+
+    // Filter to groups that look like expert families (2+ tensors).
+    let mut groups: Vec<(String, Vec<String>)> = seen.into_iter().filter(|(_, v)| v.len() >= 2).collect();
+
+    if groups.is_empty() {
+        return Err(Error::Gguf("no expert tensors detected".into()));
+    }
+
+    // For each group, merge experts.
+    let mut writer = GgufWriter::new(gg.version, gg.alignment);
+    for kv in &gg.metadata {
+        writer.add_kv(kv.clone());
+    }
+    writer.add_kv(MetadataKv {
+        key: "spynaltap.moe.strategy".into(),
+        value_type: 8,
+        value: MetaValue::String(strategy.into()),
+    });
+
+    let moe_strat = parse_moe_strategy(strategy)?;
+
+    // Copy tensors that are NOT experts.
+    let all_expert: std::collections::HashSet<&str> = groups.iter()
+        .flat_map(|(_, v)| v.iter().map(|s| s.as_str()))
+        .collect();
+
+    let mut merged_count = 0;
+    let mut copy_count = 0;
+
+    for ti in &gg.tensors {
+        if all_expert.contains(ti.name.as_str()) {
+            continue; // handled below
+        }
+        // Copy verbatim.
+        let src = gg.tensor_slice(ti).unwrap_or_default();
+        writer.add_tensor(ti.name.clone(), ti.n_dims, ti.dims, ti.ggml_type, src);
+        copy_count += 1;
+    }
+
+    for (base, names) in &mut groups {
+        // Dequantize and merge each expert.
+        names.sort();
+        let infos: Vec<_> = names.iter().filter_map(|n| gg.get_tensor(n)).collect();
+        if infos.is_empty() {
+            continue;
+        }
+        let ref_info = infos[0];
+        let deq_experts: Vec<Vec<f32>> = infos.iter().map(|info| {
+            let bytes = gg.tensor_slice(info).unwrap_or_default();
+            gguf_dequant::dequantize(info.ggml_type, bytes, None)
+                .unwrap_or_else(|| bytes.iter().map(|&b| b as f32).collect())
+        }).collect();
+
+        let shape = (dims_product(&ref_info.dims, ref_info.n_dims) as usize, 1usize);
+        let moe_w = MoEWeights::new(deq_experts, shape);
+
+        let merged = merge_experts(&moe_w, moe_strat);
+        let merged_bytes: Vec<u8> = merged.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        // Write merged tensor (as F32).
+        let merged_name = format!("{base}merged");
+        writer.add_tensor(merged_name, ref_info.n_dims, ref_info.dims, GgmlType::F32, &merged_bytes);
+        merged_count += 1;
+        eprintln!("  merged {}: {} experts -> 1", base, names.len());
+    }
+
+    confirm_or_exit(&format!("MoE merge: {} expert groups, {} copied", merged_count, copy_count), out, yes)?;
+    let out_bytes = writer.into_bytes()?;
+    let mut f = std::fs::File::create(out)?;
+    f.write_all(&out_bytes)?;
+    eprintln!("[moe] wrote {}", out.display());
+    Ok(())
+}
+
+fn parse_moe_strategy(s: &str) -> Result<MoEMergeStrategy, Error> {
+    if s == "average" {
+        Ok(MoEMergeStrategy::Average)
+    } else if let Some(k) = s.strip_prefix("similarity:") {
+        let k = k.parse::<usize>()
+            .map_err(|_| Error::Gguf(format!("bad similarity k '{k}'")))?;
+        Ok(MoEMergeStrategy::Similarity { keep_top_k: k })
+    } else {
+        Err(Error::Gguf(format!(
+            "unknown MoE strategy '{s}' (use 'average' or 'similarity:<k>')"
+        )))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MergeConfig {
+    #[serde(default)]
+    strategy: String,
+    #[serde(default)]
+    weights: Option<Vec<f64>>,
 }
 
 fn run_bench(op: &str, _model: Option<&Path>, _iterations: usize) -> Result<(), Error> {
@@ -488,8 +823,17 @@ fn parse_quant_type(s: &str) -> Result<GgmlType, Error> {
         "q8_0" => Ok(GgmlType::Q8_0),
         "q8_1" => Ok(GgmlType::Q8_1),
         "q8_k" => Ok(GgmlType::Q8K),
+        "iq1_s" => Ok(GgmlType::Iq1S),
+        "iq2_xxs" => Ok(GgmlType::Iq2Xxs),
+        "iq2_xs" => Ok(GgmlType::Iq2Xs),
+        "iq3_xxs" => Ok(GgmlType::Iq3Xxs),
+        "iq3_s" => Ok(GgmlType::Iq3S),
+        "iq4_nl" => Ok(GgmlType::Iq4Nl),
+        "iq4_xs" => Ok(GgmlType::Iq4Xs),
+        "tq1_0" => Ok(GgmlType::Tq1_0),
+        "tq2_0" => Ok(GgmlType::Tq2_0),
         other => Err(Error::Gguf(format!(
-            "unsupported quant type {:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k)", other
+            "unsupported quant type {:?} (supported: q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0, q8_1, q8_k, iq1_s, iq2_xxs, iq2_xs, iq3_xxs, iq3_s, iq4_nl, iq4_xs, tq1_0, tq2_0)", other
         ))),
     }
 }

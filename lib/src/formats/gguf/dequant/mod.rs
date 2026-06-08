@@ -1,7 +1,7 @@
 //! Dequantization dispatch. Prefers SIMD when available (x86_64 AVX2 + F16C),
 //! falls back to scalar code otherwise.
 
-mod lookup;
+pub(crate) mod lookup;
 mod par;
 mod scalar;
 #[cfg(target_arch = "x86_64")]

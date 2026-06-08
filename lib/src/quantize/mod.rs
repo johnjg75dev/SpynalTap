@@ -17,6 +17,13 @@
 //! constraints of the canonical layout are satisfied trivially.
 
 pub mod apply;
+pub mod iq1_s;
+pub mod iq2_xs;
+pub mod iq2_xxs;
+pub mod iq3_s;
+pub mod iq3_xxs;
+pub mod iq4_nl;
+pub mod iq4_xs;
 pub mod q2_k;
 pub mod q3_k;
 pub mod q4_0;
@@ -29,6 +36,10 @@ pub mod q6_k;
 pub mod q8_0;
 pub mod q8_1;
 pub mod q8_k;
+pub mod tq1_0;
+pub mod tq2_0;
+#[cfg(target_arch = "x86_64")]
+mod simd;
 
 use crate::formats::gguf::types::GgmlType;
 
@@ -53,7 +64,22 @@ pub fn quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
             ty,
         );
     }
-match ty {
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            if let Some(v) = unsafe { simd::try_quantize(src, ty) } {
+                return v;
+            }
+        }
+    }
+
+    dispatch_quantize(src, ty)
+}
+
+#[inline(never)]
+fn dispatch_quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
+    match ty {
         GgmlType::Q2K => q2_k::quantize(src),
         GgmlType::Q3K => q3_k::quantize(src),
         GgmlType::Q4_0 => q4_0::quantize(src),
@@ -66,6 +92,15 @@ match ty {
         GgmlType::Q8_0 => q8_0::quantize(src),
         GgmlType::Q8_1 => q8_1::quantize(src),
         GgmlType::Q8K => q8_k::quantize(src),
+        GgmlType::Iq2Xs => iq2_xs::quantize(src),
+        GgmlType::Iq2Xxs => iq2_xxs::quantize(src),
+        GgmlType::Iq3Xxs => iq3_xxs::quantize(src),
+        GgmlType::Iq3S => iq3_s::quantize(src),
+        GgmlType::Iq4Nl => iq4_nl::quantize(src),
+        GgmlType::Iq4Xs => iq4_xs::quantize(src),
+        GgmlType::Iq1S => iq1_s::quantize(src),
+        GgmlType::Tq1_0 => tq1_0::quantize(src),
+        GgmlType::Tq2_0 => tq2_0::quantize(src),
         other => panic!("quantize: unsupported type {:?}", other),
     }
 }
@@ -86,6 +121,15 @@ pub fn is_quantizable(ty: GgmlType) -> bool {
             | GgmlType::Q8_0
             | GgmlType::Q8_1
             | GgmlType::Q8K
+            | GgmlType::Iq2Xs
+            | GgmlType::Iq2Xxs
+            | GgmlType::Iq3Xxs
+            | GgmlType::Iq3S
+            | GgmlType::Iq4Nl
+            | GgmlType::Iq4Xs
+            | GgmlType::Iq1S
+            | GgmlType::Tq1_0
+            | GgmlType::Tq2_0
     )
 }
 
@@ -114,6 +158,15 @@ pub fn quantize_par(src: &[f32], ty: GgmlType) -> Vec<u8> {
         GgmlType::Q8_0 => chunks.par_iter().map(|c| q8_0::quantize(c)).collect(),
         GgmlType::Q8_1 => chunks.par_iter().map(|c| q8_1::quantize(c)).collect(),
         GgmlType::Q8K => chunks.par_iter().map(|c| q8_k::quantize(c)).collect(),
+        GgmlType::Iq2Xs => chunks.par_iter().map(|c| iq2_xs::quantize(c)).collect(),
+        GgmlType::Iq2Xxs => chunks.par_iter().map(|c| iq2_xxs::quantize(c)).collect(),
+        GgmlType::Iq3Xxs => chunks.par_iter().map(|c| iq3_xxs::quantize(c)).collect(),
+        GgmlType::Iq3S => chunks.par_iter().map(|c| iq3_s::quantize(c)).collect(),
+        GgmlType::Iq4Nl => chunks.par_iter().map(|c| iq4_nl::quantize(c)).collect(),
+        GgmlType::Iq4Xs => chunks.par_iter().map(|c| iq4_xs::quantize(c)).collect(),
+        GgmlType::Iq1S => chunks.par_iter().map(|c| iq1_s::quantize(c)).collect(),
+        GgmlType::Tq1_0 => chunks.par_iter().map(|c| tq1_0::quantize(c)).collect(),
+        GgmlType::Tq2_0 => chunks.par_iter().map(|c| tq2_0::quantize(c)).collect(),
         other => panic!("quantize_par: unsupported type {:?}", other),
     };
     let total: usize = parts.iter().map(|v| v.len()).sum();
