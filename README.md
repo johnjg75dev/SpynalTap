@@ -96,7 +96,7 @@ tensorkit — these go to eleven.
 ### From source
 
 ```bash
-git clone https://github.com/anomalyco/tensorkit.git
+git clone https://github.com/johnjg75dev/TensorKit.git
 cd tensorkit
 cargo build --release
 ./target/release/tensorkit --help
@@ -483,7 +483,7 @@ The `tensorkit` library crate provides the core functionality. Use it in your ow
 
 ```toml
 [dependencies]
-tensorkit = { git = "https://github.com/anomalyco/tensorkit.git" }
+tensorkit = { git = "https://github.com/johnjg75dev/TensorKit.git" }
 ```
 
 ### Basic usage

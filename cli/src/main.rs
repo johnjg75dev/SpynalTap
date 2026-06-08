@@ -40,10 +40,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+const VERSION: &str = env!("GIT_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(
     name = "tensorkit",
-    version,
+    version = VERSION,
     about = "tensorkit — these go to eleven.",
     long_about = "Analyze, prune, SVD-compress, merge, and quantize AI model files.\n\n\
                   Run `tensorkit <command> --help` for command-specific options."

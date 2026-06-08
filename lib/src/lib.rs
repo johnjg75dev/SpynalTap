@@ -54,3 +54,7 @@ pub use svd::{
     build_plan as build_svd_plan, LayerSelection, OutputDtype, RankClamps, RankSpec,
     RankSpecWithClamps, SvdApplied, SvdConfig, SvdPlan, SvdReport, SvdTarget, TensorSelection,
 };
+
+pub fn git_version() -> &'static str {
+    env!("GIT_VERSION")
+}
