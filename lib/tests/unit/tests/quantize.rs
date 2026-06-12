@@ -544,7 +544,7 @@ fn run_e2e(target: GgmlType) {
     ));
     tiny_gguf_f32(&tmp_in);
 
-    let report = quantize_gguf(&tmp_in, target, &tmp_out).expect("quantize_gguf");
+    let report = quantize_gguf(&tmp_in, target, &tmp_out, None).expect("quantize_gguf");
     assert_eq!(report.target, target.as_str());
     assert_eq!(report.tensors_total, 3);
     assert_eq!(report.tensors_quantized, 3);
@@ -670,7 +670,7 @@ fn e2e_passthrough_keeps_dtypes() {
         n
     ));
     tiny_gguf_f32(&tmp_in);
-    let _ = quantize_gguf(&tmp_in, GgmlType::Q4_0, &tmp_in); // nope; we want a q4_0 input
+    let _ = quantize_gguf(&tmp_in, GgmlType::Q4_0, &tmp_in, None); // nope; we want a q4_0 input
                                                              // Build a real Q4_0 input by quantizing f32 -> q4_0 bytes for the weight tensor.
     let mut w = GgufWriter::new(3, 32);
     w.add_kv(MetadataKv {
@@ -692,7 +692,7 @@ fn e2e_passthrough_keeps_dtypes() {
     let out = w.into_bytes().unwrap();
     std::fs::write(&tmp_in, &out).unwrap();
 
-    let report = quantize_gguf(&tmp_in, GgmlType::Q8_0, &tmp_out).expect("quantize");
+    let report = quantize_gguf(&tmp_in, GgmlType::Q8_0, &tmp_out, None).expect("quantize");
     assert_eq!(report.tensors_passthrough, 1);
     assert_eq!(report.tensors_quantized, 0);
     assert_eq!(report.bytes_in, report.bytes_out);

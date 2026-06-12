@@ -212,3 +212,31 @@ fn explicit_shape_overrides_2d_on_duplicate() {
         .unwrap();
     assert_eq!(dup_n.1.len(), 2 * 4);
 }
+
+#[test]
+fn duplicate_insert_at_higher_block_renumbers() {
+    // Model has blk.0, blk.1, blk.2. Insert copy of blk.1 after blk.2.
+    // blk.2 should become blk.3.
+    let model = FakeModel::new(vec![
+        ("blk.0.attn_q.weight".into(), vec![2, 2], f32_bytes(&[1.0; 4])),
+        ("blk.1.attn_q.weight".into(), vec![2, 2], f32_bytes(&[2.0; 4])),
+        ("blk.2.attn_q.weight".into(), vec![2, 2], f32_bytes(&[3.0; 4])),
+    ]);
+    let plan = InsertPlan {
+        after_block: 2,
+        source: InsertSource::Duplicate { block_index: 1 },
+        explicit_shape: None,
+        new_block_name: None,
+    };
+    let res = insert_block(&model, &plan).unwrap();
+    assert_eq!(res.new_block_index, 3);
+    // Should have: blk.3 (duplicate of blk.1) + blk.3 is the new block,
+    // and blk.2 stays at index 2 (no renumbering needed since we insert AFTER it).
+    // Wait — we insert after blk.2, so the new block is blk.3.
+    // But there's no blk.3 to renumber. So just the duplicate.
+    let names: Vec<&str> = res.tensors.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"blk.3.attn_q.weight"), "got {:?}", names);
+    // Verify the duplicate's bytes match blk.1's.
+    let dup = res.tensors.iter().find(|(n, _)| n == "blk.3.attn_q.weight").unwrap();
+    assert_eq!(dup.1, f32_bytes(&[2.0; 4]));
+}

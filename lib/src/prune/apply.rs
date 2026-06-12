@@ -489,3 +489,102 @@ fn chrono_now_for_metadata() -> String {
         .unwrap_or_default();
     format!("{}", dur.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_block_key_basic() {
+        let r = parse_block_key("llama.blk.3.attn_q.weight").unwrap();
+        assert_eq!(r.0, "llama.");
+        assert_eq!(r.1, 3);
+        assert_eq!(r.2, ".attn_q.weight");
+    }
+
+    #[test]
+    fn parse_block_key_no_block() {
+        assert!(parse_block_key("output.weight").is_none());
+    }
+
+    #[test]
+    fn parse_block_key_large_index() {
+        let r = parse_block_key("blk.127.ffn_up.weight").unwrap();
+        assert_eq!(r.0, "");
+        assert_eq!(r.1, 127);
+        assert_eq!(r.2, ".ffn_up.weight");
+    }
+
+    #[test]
+    fn shrink_array_correctness() {
+        let arr = ArrayValue {
+            elem_type: 4, // U32
+            elements: (0..10)
+                .map(|i| MetaValue::U32(i as u32))
+                .collect(),
+        };
+        let result = shrink_array(&arr, &[2, 5, 8]);
+        assert_eq!(result.elements.len(), 7);
+        // Check remaining values: 0,1,3,4,6,7,9
+        let vals: Vec<u32> = result
+            .elements
+            .iter()
+            .map(|e| match e {
+                MetaValue::U32(v) => *v,
+                _ => panic!("expected U32"),
+            })
+            .collect();
+        assert_eq!(vals, vec![0, 1, 3, 4, 6, 7, 9]);
+    }
+
+    #[test]
+    fn shrink_array_empty_drop() {
+        let arr = ArrayValue {
+            elem_type: 4,
+            elements: vec![MetaValue::U32(1), MetaValue::U32(2)],
+        };
+        let result = shrink_array(&arr, &[]);
+        assert_eq!(result.elements.len(), 2);
+    }
+
+    #[test]
+    fn shrink_array_drop_all() {
+        let arr = ArrayValue {
+            elem_type: 4,
+            elements: vec![MetaValue::U32(1), MetaValue::U32(2), MetaValue::U32(3)],
+        };
+        let result = shrink_array(&arr, &[0, 1, 2]);
+        assert!(result.elements.is_empty());
+    }
+
+    #[test]
+    fn rename_block_tensor_name() {
+        let mut remap = std::collections::HashMap::new();
+        remap.insert(7, 3);
+        assert_eq!(rename_block("blk.7.ffn_up.weight", &remap), "blk.3.ffn_up.weight");
+    }
+
+    #[test]
+    fn rename_block_no_blk_prefix() {
+        let remap = std::collections::HashMap::new();
+        assert_eq!(rename_block("token_embd.weight", &remap), "token_embd.weight");
+    }
+
+    #[test]
+    fn rename_block_no_remap_entry() {
+        let remap = std::collections::HashMap::new();
+        assert_eq!(rename_block("blk.5.attn_q.weight", &remap), "blk.5.attn_q.weight");
+    }
+
+    #[test]
+    fn rename_metadata_block_key_basic() {
+        let result = rename_metadata_block_key("llama.blk.5.rope_freqs", 5, 3);
+        assert_eq!(result, "llama.blk.3.rope_freqs");
+    }
+
+    #[test]
+    fn rename_metadata_block_key_no_match() {
+        let result = rename_metadata_block_key("llama.output.weight", 5, 3);
+        assert_eq!(result, "llama.output.weight");
+    }
+}

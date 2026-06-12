@@ -65,3 +65,41 @@ fn index_list_reverse_range() {
     let v = parse_index_list("7-5").unwrap();
     assert_eq!(v, vec![5, 6, 7]);
 }
+
+#[test]
+fn selection_empty_string() {
+    assert!(parse_selection("").is_err());
+}
+
+#[test]
+fn selection_keep_large_indices() {
+    let s = parse_selection("keep:999999").unwrap();
+    match s {
+        Selection::Keep(v) => {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0], 999999);
+        }
+        _ => panic!("expected Keep"),
+    }
+}
+
+#[test]
+fn selection_drop_duplicates() {
+    let s = parse_selection("drop:5,5,5").unwrap();
+    match s {
+        Selection::Drop(v) => assert_eq!(v, vec![5]),
+        _ => panic!("expected Drop"),
+    }
+}
+
+#[test]
+fn parse_index_list_empty() {
+    let v = parse_index_list("").unwrap();
+    assert!(v.is_empty());
+}
+
+#[test]
+fn parse_index_list_whitespace() {
+    let v = parse_index_list(" 3 , 5 ").unwrap();
+    assert_eq!(v, vec![3, 5]);
+}

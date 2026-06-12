@@ -1,7 +1,15 @@
-use tensorkit::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
-use tensorkit::formats::gguf::writer::GgufWriter;
 use std::path::PathBuf;
 use std::process::Command;
+use tensorkit::formats::gguf::types::{GgmlType, MetaValue, MetadataKv};
+use tensorkit::formats::gguf::writer::GgufWriter;
+
+struct Cleanup(PathBuf, PathBuf);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(&self.1);
+    }
+}
 
 fn make_test_gguf(path: &PathBuf) {
     let mut w = GgufWriter::new(3, 32);
@@ -34,13 +42,15 @@ fn cli_quantize_q4_0_smoke() {
         std::env::temp_dir().join(format!("tensorkit-cli-in-{}.gguf", std::process::id()));
     let out_path =
         std::env::temp_dir().join(format!("tensorkit-cli-out-{}.gguf", std::process::id()));
+    let _cleanup = Cleanup(in_path.clone(), out_path.clone());
     make_test_gguf(&in_path);
 
     let exe = std::env::var("CARGO_BIN_EXE_tensorkit")
         .unwrap_or_else(|_| "target/debug/tensorkit".to_string());
     let out = Command::new(&exe)
+        .arg("quant")
         .arg(&in_path)
-        .arg("--quantize")
+        .arg("--target")
         .arg("q4_0")
         .arg("--out")
         .arg(&out_path)
@@ -68,7 +78,4 @@ fn cli_quantize_q4_0_smoke() {
         .find(|t| t.name == "blk.0.attn_q.weight")
         .unwrap();
     assert_eq!(ti.ggml_type, GgmlType::Q4_0);
-
-    let _ = std::fs::remove_file(&in_path);
-    let _ = std::fs::remove_file(&out_path);
 }

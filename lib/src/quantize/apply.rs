@@ -46,7 +46,14 @@ pub struct QuantizeReport {
 }
 
 /// Quantize every tensor in `src` to `target` and write the result to `dst`.
-pub fn quantize_gguf(src: &Path, target: GgmlType, dst: &Path) -> Result<QuantizeReport> {
+/// If `blocks` is `Some`, only tensors whose block index (parsed from `blk.N.`)
+/// is in the set are quantized; all others are passed through verbatim.
+pub fn quantize_gguf(
+    src: &Path,
+    target: GgmlType,
+    dst: &Path,
+    blocks: Option<&[i32]>,
+) -> Result<QuantizeReport> {
     if !quantize::is_quantizable(target) {
         return Err(Error::Quantize(format!(
             "target type {:?} is not a supported quant type",
@@ -74,6 +81,18 @@ pub fn quantize_gguf(src: &Path, target: GgmlType, dst: &Path) -> Result<Quantiz
         let src_bytes = gg
             .tensor_slice(ti)
             .ok_or_else(|| Error::Gguf(format!("tensor '{}' not in mmap", ti.name)))?;
+        // Block selection: skip tensors not in the selected blocks.
+        if let Some(allowed) = blocks {
+            if let Some(idx) = block_index_from_name(&ti.name) {
+                if !allowed.contains(&idx) {
+                    writer.add_tensor(ti.name.clone(), ti.n_dims, ti.dims, ti.ggml_type, src_bytes);
+                    n_p += 1;
+                    total_in += ti.byte_size;
+                    total_out += ti.byte_size;
+                    continue;
+                }
+            }
+        }
         let n_elems = dims_product(&ti.dims, ti.n_dims);
         if ti.ggml_type == target {
             // Pass-through.
@@ -114,7 +133,16 @@ pub fn quantize_gguf(src: &Path, target: GgmlType, dst: &Path) -> Result<Quantiz
         }
         let new_bytes = quantize::quantize(&deq, target);
         let new_bz = new_bytes.len() as u64;
-        debug_assert_eq!(new_bz, byte_size_for(n_elems, target));
+        if new_bz != byte_size_for(n_elems, target) {
+            return Err(Error::Quantize(format!(
+                "tensor '{}': quantized to {} bytes, expected {} for {} elements at {:?}",
+                ti.name,
+                new_bz,
+                byte_size_for(n_elems, target),
+                n_elems,
+                target
+            )));
+        }
 
         // Round-trip error: dequantize what we just wrote and compare.
         let err = if let Some(recon) = gguf_dequant::dequantize(target, &new_bytes, None) {
@@ -187,4 +215,11 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .zip(b)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max)
+}
+
+/// If `name` has the form `blk.<idx>.<rest>`, returns `Some(idx)`.
+fn block_index_from_name(name: &str) -> Option<i32> {
+    let rest = name.strip_prefix("blk.")?;
+    let idx_str = rest.split('.').next()?;
+    idx_str.parse().ok()
 }

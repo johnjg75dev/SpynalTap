@@ -9,6 +9,7 @@ pub enum ModelFormat {
     Gguf,
     Safetensors,
     Onnx,
+    Unknown,
 }
 
 impl ModelFormat {
@@ -22,7 +23,7 @@ impl ModelFormat {
                 Self::Safetensors
             }
             Some(ext) if ext.eq_ignore_ascii_case("onnx") => Self::Onnx,
-            _ => Self::Gguf,
+            _ => Self::Unknown,
         }
     }
 
@@ -31,6 +32,7 @@ impl ModelFormat {
             Self::Gguf => "gguf",
             Self::Safetensors => "safetensors",
             Self::Onnx => "onnx",
+            Self::Unknown => "unknown",
         }
     }
 }

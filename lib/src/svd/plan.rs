@@ -152,8 +152,30 @@ pub fn build_plan<M: Model + ?Sized>(model: &M, cfg: &SvdConfig) -> Result<SvdPl
         let esz = match cfg.dtype {
             crate::svd::config::OutputDtype::F32 => 4,
             crate::svd::config::OutputDtype::F16
-            | crate::svd::config::OutputDtype::Bf16
-            | crate::svd::config::OutputDtype::AutoQuant => 2,
+            | crate::svd::config::OutputDtype::Bf16 => 2,
+            crate::svd::config::OutputDtype::AutoQuant => {
+                // Match auto_pick_quant logic: float/int sources → F16 (esz=2),
+                // quantized sources → Q8_0 (esz from block_bytes).
+                let src_is_float = matches!(
+                    t.dtype,
+                    crate::model::TensorDtype::F32
+                        | crate::model::TensorDtype::F16
+                        | crate::model::TensorDtype::Bf16
+                        | crate::model::TensorDtype::F64
+                        | crate::model::TensorDtype::I8
+                        | crate::model::TensorDtype::I16
+                        | crate::model::TensorDtype::I32
+                        | crate::model::TensorDtype::I64
+                );
+                if src_is_float {
+                    2
+                } else {
+                    crate::formats::gguf::types::GgmlType::Q8_0
+                        .block_bytes()
+                        .unwrap_or(34) as u64
+                        / 32
+                }
+            }
             crate::svd::config::OutputDtype::Ggml(t) => {
                 // Quantized: 1 byte per 32 values is a safe lower-bound estimate
                 // for the compression_ratio reporting. Real byte size is

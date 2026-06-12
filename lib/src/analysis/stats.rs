@@ -128,11 +128,6 @@ pub struct Accum {
     l1: f64,
     min: f32,
     max: f32,
-    #[allow(dead_code)]
-    near_zero: u64,
-    #[allow(dead_code)]
-    far_outlier: u64,
-    seen_buckets: u32,
     bucket_counts: Vec<u32>,
     reservoir: Vec<f32>,
     rng_state: u64,
@@ -161,9 +156,6 @@ impl Accum {
             l1: 0.0,
             min: f32::INFINITY,
             max: f32::NEG_INFINITY,
-            near_zero: 0,
-            far_outlier: 0,
-            seen_buckets: 0,
             bucket_counts: vec![0u32; 1usize << N_BUCKETS_LOG2],
             reservoir: Vec::with_capacity(RESERVOIR_SIZE),
             rng_state: 0x9E37_79B9_7F4A_7C15,
@@ -245,9 +237,6 @@ impl Accum {
         }
 
         let key = bucket_key(x);
-        if self.bucket_counts[key] == 0 {
-            self.seen_buckets |= 1u32 << (key % 32);
-        }
         self.bucket_counts[key] = self.bucket_counts[key].saturating_add(1);
 
         // Per-channel (per-row) update. The analyzer pushes values in

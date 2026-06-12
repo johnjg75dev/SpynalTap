@@ -58,7 +58,10 @@ impl GgufWriter {
         let n_elements = dims_product(&dims, n_dims);
         let expected = byte_size_for(n_elements, ty);
         let byte_size = bytes.len() as u64;
-        debug_assert_eq!(byte_size, expected, "tensor '{name}': byte count mismatch");
+        assert_eq!(
+            byte_size, expected,
+            "tensor '{name}': byte count mismatch ({byte_size} vs {expected})"
+        );
         self.tensors.push(WriterTensor {
             name,
             n_dims,

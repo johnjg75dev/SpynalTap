@@ -365,6 +365,12 @@ pub(crate) fn run_analyze(model: &Path, sample: usize, json: bool, report_path: 
                 print_dry_run_analysis(&analysis);
             }
         }
+        ModelFormat::Unknown => {
+            return Err(Error::Gguf(format!(
+                "unsupported file extension for '{}'. Supported formats: .gguf, .safetensors/.st, .onnx",
+                model.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -402,6 +408,12 @@ pub(crate) fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: b
             confirm_or_exit(&format!("prune {:?}", plan.dropped_blocks), out, yes)?;
             let report = apply_to_onnx(&onnx, &plan, out)?;
             print_prune_report(&report);
+        }
+        ModelFormat::Unknown => {
+            return Err(Error::Gguf(format!(
+                "unsupported file extension for '{}'. Supported formats: .gguf, .safetensors/.st, .onnx",
+                model.display()
+            )));
         }
     }
     Ok(())
@@ -462,6 +474,12 @@ pub(crate) fn run_svd(
             let report = svd_apply_onnx(&onnx, &plan, out)?;
             print_svd_report(&report);
         }
+        ModelFormat::Unknown => {
+            return Err(Error::Gguf(format!(
+                "unsupported file extension for '{}'. Supported formats: .gguf, .safetensors/.st, .onnx",
+                model.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -475,11 +493,16 @@ pub(crate) fn run_quant(model: &Path, target_str: &str, out: &Path, blocks_str: 
     let target = parse_quant_type(target_str)?;
     eprintln!("[quant] {} -> {} as {}", model.display(), out.display(), target.as_str());
     
-    // TODO: implement block selection
-    let _blocks = blocks_str;
+    let blocks = if blocks_str == "all" || blocks_str.is_empty() {
+        None
+    } else {
+        let indices = tensorkit::prune::selection::parse_index_list(blocks_str)
+            .map_err(|e| Error::Gguf(format!("invalid --blocks: {e}")))?;
+        Some(indices)
+    };
     
     confirm_or_exit(&format!("quantize to {}", target.as_str()), out, yes)?;
-    let report = quantize_gguf_apply(model, target, out)?;
+    let report = quantize_gguf_apply(model, target, out, blocks.as_deref())?;
     print_quant_report(&report);
     Ok(())
 }

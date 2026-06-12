@@ -45,3 +45,17 @@ fn test_chart_json_contains_expected_keys() {
     assert!(json.contains("roleCounts"));
     assert!(json.contains("spectra"));
 }
+
+#[test]
+fn date_format_is_valid() {
+    let d = super::chrono_lite_date();
+    assert_eq!(d.len(), 10);
+    assert_eq!(&d[4..5], "-");
+    assert_eq!(&d[7..8], "-");
+    // Verify it parses as a real date (year >= 2024, month 1-12, day 1-31)
+    let parts: Vec<u32> = d.split('-').filter_map(|p| p.parse().ok()).collect();
+    assert_eq!(parts.len(), 3);
+    assert!(parts[0] >= 2024, "year too small: {}", parts[0]);
+    assert!(parts[1] >= 1 && parts[1] <= 12, "month out of range: {}", parts[1]);
+    assert!(parts[2] >= 1 && parts[2] <= 31, "day out of range: {}", parts[2]);
+}

@@ -62,3 +62,27 @@ fn similarity_rejects_zero_top_k() {
     let moe = experts();
     let _ = merge_experts(&moe, MoEMergeStrategy::Similarity { keep_top_k: 0 });
 }
+
+#[test]
+fn merge_two_identical_experts() {
+    let e = vec![1.0, 2.0, 3.0, 4.0];
+    let moe = MoEWeights::new(vec![e.clone(), e.clone()], (2, 2));
+    let m = merge_experts(&moe, MoEMergeStrategy::Average);
+    for (g, w) in m.iter().zip(e.iter()) {
+        assert!((g - w).abs() < 1e-6, "got {g} want {w}");
+    }
+}
+
+#[test]
+fn merge_single_expert_returns_it() {
+    let e = vec![10.0, 20.0, 30.0, 40.0];
+    let moe = MoEWeights::new(vec![e.clone()], (2, 2));
+    let m = merge_experts(&moe, MoEMergeStrategy::Average);
+    assert_eq!(m, e);
+}
+
+#[test]
+#[should_panic]
+fn moe_empty_experts_panics() {
+    let _ = MoEWeights::new(vec![], (2, 2));
+}
